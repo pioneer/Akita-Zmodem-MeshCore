@@ -1,17 +1,17 @@
 # Core dependencies for Akita-Zmodem-MeshCore
 
-# For MeshCore network communication
-# Please ensure the installed 'meshcore' library is compatible with the API used in the script
-# (e.g., fdlamotte/meshcore_py or a similar asyncio-based library with 'create_serial', 'subscribe', 'commands.send_msg')
-meshcore
+# MeshCore network communication (meshcore-dev/meshcore_py)
+# send_msg(dst, msg: str) – binary payloads must be base64-encoded by the
+# caller because the library calls msg.encode("utf-8") internally and the
+# receiver decodes with .decode("utf-8", "ignore"), which is lossy for
+# arbitrary bytes.
+meshcore>=2.3.0,<3.0
 
 # Zmodem: implemented in-tree (zmodem.py). No external `zmodem` package
-# is required for normal operation. If you need a full-featured third-party
-# implementation, install it explicitly and update this file.
-# zmodem  # optional
+# is required for normal operation.
 
 # Optional, for CLI progress bars
-tqdm
+tqdm>=4.0
 
 # Optional: CRC utilities (not required unless using external zmodem libs)
-crcmod
+crcmod>=1.7

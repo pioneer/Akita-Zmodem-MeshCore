@@ -34,6 +34,7 @@ except Exception:
         CONTACT_MSG_RECV = "contact_msg_recv"
         ERROR = "error"
 
+import base64
 import zmodem
 import atexit
 import tempfile
@@ -250,7 +251,7 @@ class AkitaZmodemMeshCore:
                 port = self.app_config.get("mesh_serial_port")
                 baud = self.app_config.get("mesh_serial_baud")
                 logging.info(f"Connecting Serial: {port} @ {baud}")
-                self.mesh = await MeshCore.create_serial(device=port, baud=baud)
+                self.mesh = await MeshCore.create_serial(port=port, baudrate=baud)
             elif conn_type == "tcp":
                 host = self.app_config.get("mesh_tcp_host")
                 port = self.app_config.get("mesh_tcp_port")
@@ -269,15 +270,27 @@ class AkitaZmodemMeshCore:
     async def _on_mesh_message(self, event):
         try:
             payload = event.payload
-            # Extract Source ID (compatible with multiple lib versions)
-            src = str(payload.get('from_num', payload.get('from', 'unknown')))
-            
+            # Extract Source ID – real meshcore uses 'pubkey_prefix',
+            # older/mock versions may use 'from_num' or 'from'.
+            src = str(payload.get('pubkey_prefix',
+                      payload.get('from_num',
+                      payload.get('from', 'unknown'))))
+
             # Extract Data (decoded payload or raw text fallback)
             data = payload.get('decoded', {}).get('payload')
             if not data:
                 txt = payload.get('text')
-                if isinstance(txt, str): data = txt.encode('utf-8', 'ignore')
-                elif isinstance(txt, bytes): data = txt
+                if isinstance(txt, str):
+                    # Binary payloads are base64-encoded before being
+                    # handed to meshcore's text-based send_msg, so try
+                    # to decode first.  Plain text messages will fail
+                    # b64decode and fall back to UTF-8 encoding.
+                    try:
+                        data = base64.b64decode(txt, validate=True)
+                    except Exception:
+                        data = txt.encode('utf-8', 'ignore')
+                elif isinstance(txt, bytes):
+                    data = txt
 
             if data and isinstance(data, bytes):
                 await self._mesh_receive_queue.put({"source": src, "data": data})
@@ -363,18 +376,23 @@ class AkitaZmodemMeshCore:
                     header = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port)
                     remaining = packet
 
-                    # Chunking: ensure each chunk begins with header so receiver can
-                    # unconditionally strip it.  We account for header size when
-                    # slicing the payload portion so chunks stay within the
-                    # configured mesh_packet_chunk_size.
-                    max_payload = self.mesh_packet_chunk_size - len(header)
+                    # Chunking: ensure each chunk begins with header so receiver
+                    # can unconditionally strip it.  Because meshcore's
+                    # send_msg() only accepts str and round-trips through
+                    # UTF-8, we base64-encode each chunk.  The encoded
+                    # output is ~33 % larger, so we shrink the raw piece
+                    # size so that the final base64 message stays within
+                    # mesh_packet_chunk_size.
+                    max_raw = (self.mesh_packet_chunk_size * 3) // 4
+                    max_payload = max_raw - len(header)
                     while remaining:
                         piece = remaining[:max_payload]
                         remaining = remaining[len(piece):]
                         chunk = header + piece
                         try:
-                            logging.debug(f"[Tx-{tid}] sending chunk {len(chunk)}")
-                            await self.mesh.commands.send_msg(destination=dest, payload=chunk)
+                            msg_str = base64.b64encode(chunk).decode('ascii')
+                            logging.debug(f"[Tx-{tid}] sending chunk {len(chunk)} (b64 {len(msg_str)})")
+                            await self.mesh.commands.send_msg(dst=dest, msg=msg_str)
                             t["last_act"] = time.time()
                             # Throttle
                             await asyncio.sleep(self.tx_delay_s)
@@ -470,8 +488,9 @@ class AkitaZmodemMeshCore:
 
                 if resp:
                     resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
-                    logging.debug(f"[Rx-{active_tid}] sending {len(resp)} bytes back")
-                    await self.mesh.commands.send_msg(destination=src, payload=resp_payload)
+                    msg_str = base64.b64encode(resp_payload).decode('ascii')
+                    logging.debug(f"[Rx-{active_tid}] sending {len(resp_payload)} bytes back (b64 {len(msg_str)})")
+                    await self.mesh.commands.send_msg(dst=src, msg=msg_str)
 
                 if await asyncio.to_thread(receiver.is_finished):
                     logging.info(f"[Rx-{active_tid}] Transfer Complete.")
@@ -489,7 +508,8 @@ class AkitaZmodemMeshCore:
                 logging.debug(f"[Tx-{active_tid}] sender returned {len(resp) if resp else 0} bytes")
                 if resp:
                     resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
-                    await self.mesh.commands.send_msg(destination=src, payload=resp_payload)
+                    msg_str = base64.b64encode(resp_payload).decode('ascii')
+                    await self.mesh.commands.send_msg(dst=src, msg=msg_str)
             except Exception as e:
                 logging.error(f"[Tx-{active_tid}] Protocol error: {e}")
     # -------------------------------------------------------------------------

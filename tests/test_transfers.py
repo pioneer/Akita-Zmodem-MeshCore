@@ -260,11 +260,11 @@ async def test_end_to_end_app_transfer(tmp_path):
             self.commands = self
             self.subscriptions = {}
             self.other = None
-        async def send_msg(self, destination, payload):
-            # debug
-            print(f"[PairMesh] sending {len(payload)} bytes to {destination}")
+        async def send_msg(self, dst=None, msg=None, **kwargs):
+            # msg is a base64 string; simulate meshcore's real behaviour:
+            # the receiver sees it as event.payload['text']
             if self.other:
-                ev = types.SimpleNamespace(payload={"decoded": {"payload": payload}, "from": "peer"})
+                ev = types.SimpleNamespace(payload={"text": msg, "pubkey_prefix": "peer"})
                 for cb in self.other.subscriptions.get(EventType.CONTACT_MSG_RECV, []):
                     await cb(ev)
         def subscribe(self, event, callback):

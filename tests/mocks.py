@@ -4,9 +4,9 @@ class MockCommands:
     def __init__(self):
         self.sent = []
 
-    async def send_msg(self, destination, payload):
+    async def send_msg(self, dst=None, msg=None, **kwargs):
         # simulate network send delay
-        self.sent.append((destination, payload))
+        self.sent.append((dst, msg))
 
 
 class MockMesh:
@@ -48,14 +48,22 @@ class MockSender:
 
 
 class MockReceiver:
-    def __init__(self, fobj):
-        self.fobj = fobj
+    def __init__(self, fobj_or_path):
+        if isinstance(fobj_or_path, str):
+            self.filepath = fobj_or_path
+            self.fobj = None
+        else:
+            self.filepath = None
+            self.fobj = fobj_or_path
         self._finished = False
 
     def receive(self, data):
-        # append bytes to file
+        # open file on first write when given a path (matches real Receiver)
         if data:
-            self.fobj.write(data)
+            if self.fobj is None and self.filepath:
+                self.fobj = open(self.filepath, 'wb')
+            if self.fobj:
+                self.fobj.write(data)
         self._finished = True
 
     def is_finished(self):
