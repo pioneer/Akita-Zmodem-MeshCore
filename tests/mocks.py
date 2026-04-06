@@ -1,5 +1,13 @@
 import time
 
+
+class MockSendResult:
+    """Mimics the result object returned by meshcore send_msg."""
+    def __init__(self, msg_type='MSG_SENT'):
+        self.type = msg_type
+        self.payload = {'type': 1, 'expected_ack': b'\x00\x00\x00\x00', 'suggested_timeout': 500}
+
+
 class MockCommands:
     def __init__(self):
         self.sent = []
@@ -7,6 +15,7 @@ class MockCommands:
     async def send_msg(self, dst=None, msg=None, **kwargs):
         # simulate network send delay
         self.sent.append((dst, msg))
+        return MockSendResult()
 
 
 class MockMesh:
@@ -35,6 +44,8 @@ class MockSender:
         # default to single small packet
         self.packets = packets if packets is not None else [b"MOCKDATA"]
         self._idx = 0
+        self.state = 'init'
+        self.offset = 0
 
     def is_finished(self):
         return self._idx >= len(self.packets)
@@ -43,7 +54,9 @@ class MockSender:
         if self._idx < len(self.packets):
             p = self.packets[self._idx]
             self._idx += 1
+            self.state = 'sending'
             return p
+        self.state = 'finished'
         return b""
 
 

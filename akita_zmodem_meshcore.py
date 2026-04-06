@@ -270,6 +270,7 @@ class AkitaZmodemMeshCore:
     async def _on_mesh_message(self, event):
         try:
             payload = event.payload
+            logging.debug(f"[Mesh-Rx] raw event payload keys={list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}")
             # Extract Source ID – real meshcore uses 'pubkey_prefix',
             # older/mock versions may use 'from_num' or 'from'.
             src = str(payload.get('pubkey_prefix',
@@ -293,7 +294,10 @@ class AkitaZmodemMeshCore:
                     data = txt
 
             if data and isinstance(data, bytes):
+                logging.debug(f"[Mesh-Rx] queued {len(data)} bytes from src={src}")
                 await self._mesh_receive_queue.put({"source": src, "data": data})
+            else:
+                logging.debug(f"[Mesh-Rx] no usable data from src={src} data_type={type(data).__name__ if data else 'None'}")
         except Exception as e:
             logging.error(f"Msg Parse Error: {e}")
 
@@ -351,10 +355,54 @@ class AkitaZmodemMeshCore:
         asyncio.create_task(self._send_loop(tid))
         return tid
 
+    def _build_chunks(self, packet):
+        """Split a zmodem packet into base64-encoded mesh chunks."""
+        header = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port)
+        max_raw = (self.mesh_packet_chunk_size * 3) // 4
+        max_payload = max_raw - len(header)
+        remaining = packet
+        chunks = []
+        while remaining:
+            piece = remaining[:max_payload]
+            remaining = remaining[len(piece):]
+            chunk = header + piece
+            chunks.append(base64.b64encode(chunk).decode('ascii'))
+        return chunks
+
+    async def _send_chunks(self, tid, dest, chunks):
+        """Send a list of base64 chunks over mesh. Returns suggested_timeout_s."""
+        t = self.transfers[tid]
+        suggested_timeout_s = 15.0  # default
+        for msg_str in chunks:
+            try:
+                logging.debug(f"[Tx-{tid}] sending b64 chunk ({len(msg_str)} chars)")
+                result = await self.mesh.commands.send_msg(dst=dest, msg=msg_str)
+                if result:
+                    logging.debug(f"[Tx-{tid}] send_msg result: type={result.type} payload={result.payload}")
+                # Use meshcore's suggested_timeout if available
+                st = None
+                if result and hasattr(result, 'payload') and isinstance(result.payload, dict):
+                    st = result.payload.get('suggested_timeout')
+                if st and isinstance(st, (int, float)) and st > 0:
+                    suggested_timeout_s = st / 1000.0
+                t["last_act"] = time.time()
+                await asyncio.sleep(self.tx_delay_s)
+            except Exception as e:
+                logging.warning(f"[Tx-{tid}] Send Fail: {e}")
+                await asyncio.sleep(1.0)
+        return suggested_timeout_s
+
     async def _send_loop(self, tid):
         t = self.transfers[tid]
         sender = t["sender"]
         dest = t["dest"]
+
+        MAX_RETRIES = 3
+        retry_timeout_s = 15.0   # updated from meshcore suggested_timeout
+        retry_count = 0
+        last_chunks = []          # b64 chunks of last packet, for retry
+        last_send_time = None
+        idle_log_time = 0         # rate-limit idle debug logs
         
         # Progress Bar
         pbar = None
@@ -367,41 +415,43 @@ class AkitaZmodemMeshCore:
                     logging.info(f"[Tx-{tid}] Transfer Complete.")
                     break
 
+                # Overall transfer timeout
+                if time.time() - t["start"] > self.timeout:
+                    logging.error(f"[Tx-{tid}] Transfer timed out after {self.timeout}s")
+                    break
+
                 # Get packet from Zmodem
                 packet = await asyncio.to_thread(sender.get_next_packet)
 
                 if packet:
-                    logging.debug(f"[Tx-{tid}] next packet size {len(packet)} state={sender.state}")
-                    # Construct ZMODEM packet once (packet includes framing)
-                    header = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port)
-                    remaining = packet
-
-                    # Chunking: ensure each chunk begins with header so receiver
-                    # can unconditionally strip it.  Because meshcore's
-                    # send_msg() only accepts str and round-trips through
-                    # UTF-8, we base64-encode each chunk.  The encoded
-                    # output is ~33 % larger, so we shrink the raw piece
-                    # size so that the final base64 message stays within
-                    # mesh_packet_chunk_size.
-                    max_raw = (self.mesh_packet_chunk_size * 3) // 4
-                    max_payload = max_raw - len(header)
-                    while remaining:
-                        piece = remaining[:max_payload]
-                        remaining = remaining[len(piece):]
-                        chunk = header + piece
-                        try:
-                            msg_str = base64.b64encode(chunk).decode('ascii')
-                            logging.debug(f"[Tx-{tid}] sending chunk {len(chunk)} (b64 {len(msg_str)})")
-                            await self.mesh.commands.send_msg(dst=dest, msg=msg_str)
-                            t["last_act"] = time.time()
-                            # Throttle
-                            await asyncio.sleep(self.tx_delay_s)
-                        except Exception as e:
-                            logging.warning(f"[Tx-{tid}] Send Fail: {e}")
-                            await asyncio.sleep(1.0) # Backoff
-                    
+                    logging.debug(f"[Tx-{tid}] zmodem packet size={len(packet)} sender.state={sender.state} offset={sender.offset}")
+                    chunks = self._build_chunks(packet)
+                    retry_timeout_s = await self._send_chunks(tid, dest, chunks)
+                    last_chunks = chunks
+                    last_send_time = time.time()
+                    retry_count = 0
                     if pbar: pbar.update(len(packet))
                 else:
+                    # No new packet — sender is waiting for ACK from remote
+                    now = time.time()
+
+                    # Rate-limit idle debug logs to every 5 seconds
+                    if now - idle_log_time >= 5.0:
+                        logging.debug(f"[Tx-{tid}] waiting for ACK, sender.state={sender.state} retries={retry_count}/{MAX_RETRIES}")
+                        idle_log_time = now
+
+                    # Retry logic: resend last packet if ACK not received in time
+                    if last_send_time and last_chunks and sender.state == 'waiting_ack':
+                        elapsed = now - last_send_time
+                        if elapsed >= retry_timeout_s:
+                            if retry_count >= MAX_RETRIES:
+                                logging.error(f"[Tx-{tid}] No ACK after {MAX_RETRIES} retries ({retry_timeout_s:.1f}s each). Giving up.")
+                                break
+                            retry_count += 1
+                            logging.info(f"[Tx-{tid}] No ACK received after {elapsed:.1f}s, retrying ({retry_count}/{MAX_RETRIES})...")
+                            retry_timeout_s = await self._send_chunks(tid, dest, last_chunks)
+                            last_send_time = time.time()
+
                     await asyncio.sleep(0.1)
 
         except Exception as e:
@@ -436,10 +486,14 @@ class AkitaZmodemMeshCore:
                 item = await asyncio.wait_for(self._mesh_receive_queue.get(), timeout=1.0)
                 src = item["source"]
                 data = item["data"]
+                logging.debug(f"[Listener] dequeued {len(data)} bytes from {src}")
 
-                if len(data) <= APP_PORT_HEADER_SIZE: continue
+                if len(data) <= APP_PORT_HEADER_SIZE:
+                    logging.debug(f"[Listener] packet too small ({len(data)} bytes), skipping")
+                    continue
 
                 port = struct.unpack(APP_PORT_HEADER_FORMAT, data[:APP_PORT_HEADER_SIZE])[0]
+                logging.debug(f"[Listener] app_port={port} (expected {self.zmodem_app_port}), payload={len(data) - APP_PORT_HEADER_SIZE} bytes")
                 if port == self.zmodem_app_port:
                     # strip header and deliver to protocol handler
                     await self._handle_zmodem_data(src, data[APP_PORT_HEADER_SIZE:])
@@ -448,6 +502,7 @@ class AkitaZmodemMeshCore:
             except Exception as e: logging.error(f"Listener Error: {e}")
 
     async def _handle_zmodem_data(self, src, data):
+        logging.debug(f"[ZmodemHandler] from={src} data_len={len(data)} transfers={[(tid, t['state']) for tid, t in self.transfers.items()]}")
         active_tid = None
         # scan transfers and, if this is a new incoming stream, initialize it
         for tid, t in list(self.transfers.items()):
@@ -474,6 +529,7 @@ class AkitaZmodemMeshCore:
                 active_tid = tid
                 break
         if not active_tid:
+            logging.debug(f"[ZmodemHandler] no matching transfer for src={src}, dropping")
             return
         t = self.transfers[active_tid]
         t["last_act"] = time.time()
@@ -670,6 +726,8 @@ async def main():
                         help="TCP host for meshcore connection (tcp)")
     parser.add_argument("--tcp-port", dest="tcp_port", type=int,
                         help="TCP port for meshcore connection (tcp)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug logging")
     
     sub = parser.add_subparsers(dest="command")
     
@@ -687,6 +745,10 @@ async def main():
     sub.add_parser("cancel").add_argument("id", type=int)
 
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger('meshcore').setLevel(logging.DEBUG)
 
     overrides = {}
     if args.mesh_type:

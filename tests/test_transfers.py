@@ -267,6 +267,7 @@ async def test_end_to_end_app_transfer(tmp_path):
                 ev = types.SimpleNamespace(payload={"text": msg, "pubkey_prefix": "peer"})
                 for cb in self.other.subscriptions.get(EventType.CONTACT_MSG_RECV, []):
                     await cb(ev)
+            return types.SimpleNamespace(type='MSG_SENT', payload={'type': 1, 'expected_ack': b'\x00', 'suggested_timeout': 500})
         def subscribe(self, event, callback):
             self.subscriptions.setdefault(event, []).append(callback)
         async def close(self):
