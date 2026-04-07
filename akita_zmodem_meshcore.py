@@ -273,6 +273,22 @@ class AkitaZmodemMeshCore:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
 
+    def _format_route(self, path_len, path_hex, hash_mode):
+        """Format a single route description from path fields."""
+        if path_len == -1:
+            return 'FLOOD'
+        elif path_len == 0:
+            return 'DIRECT'
+        else:
+            hop_hex_len = (hash_mode + 1) * 2
+            hops = [path_hex[i:i + hop_hex_len]
+                    for i in range(0, len(path_hex), hop_hex_len)] if path_hex else []
+            hops = hops[:path_len]
+            route = f'PATH ({path_len} hop{"s" if path_len != 1 else ""})'
+            if hops:
+                route += ' ' + ' → '.join(hops)
+            return route
+
     async def _describe_route(self, node_key):
         """Return a human-readable route description for *node_key*."""
         if not self.mesh:
@@ -286,23 +302,32 @@ class AkitaZmodemMeshCore:
         for _k, ct in self.mesh.contacts.items():
             if _pubkey_match(ct.get('public_key', ''), node_key):
                 name = ct.get('adv_name', '')
-                path_len = ct.get('out_path_len', -1)
-                if path_len == -1:
-                    route = 'FLOOD'
-                elif path_len == 0:
-                    route = 'DIRECT'
-                else:
-                    out_path = ct.get('out_path', '')
-                    hash_mode = ct.get('out_path_hash_mode', 0)
-                    hop_hex_len = (hash_mode + 1) * 2  # bytes per hop → hex chars
-                    hops = [out_path[i:i + hop_hex_len]
-                            for i in range(0, len(out_path), hop_hex_len)] if out_path else []
-                    hops = hops[:path_len]  # trim to actual hop count
-                    route = f'PATH ({path_len} hop{"s" if path_len != 1 else ""})'
-                    if hops:
-                        route += ' ' + ' → '.join(hops)
+                # Outbound route (how we send to them)
+                out_route = self._format_route(
+                    ct.get('out_path_len', -1),
+                    ct.get('out_path', ''),
+                    ct.get('out_path_hash_mode', 0),
+                )
+                # Advert route (how their adverts reach us — inbound)
+                adv_route = None
+                try:
+                    full_key = ct.get('public_key', '')
+                    if full_key:
+                        ev = await self.mesh.commands.get_advert_path(full_key)
+                        if ev and hasattr(ev, 'payload') and isinstance(ev.payload, dict):
+                            p = ev.payload
+                            adv_route = self._format_route(
+                                p.get('path_len', -1),
+                                p.get('path', ''),
+                                p.get('path_hash_mode', 0),
+                            )
+                except Exception:
+                    pass
                 label = f'{name} | ' if name else ''
-                return f'{label}Route: {route}'
+                parts = [f'Out: {out_route}']
+                if adv_route and adv_route != out_route:
+                    parts.append(f'In: {adv_route}')
+                return f'{label}{" | ".join(parts)}'
         return None
 
     async def _connect_mesh(self):
@@ -698,6 +723,7 @@ class AkitaZmodemMeshCore:
                     self.cancel_transfer(tid)
                     continue
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
+                t["start"] = time.time()  # reset start to when data actually arrives
                 route_desc = await self._describe_route(src)
                 if route_desc:
                     logging.info(f"[Rx-{tid}] {route_desc}")
@@ -736,6 +762,8 @@ class AkitaZmodemMeshCore:
                             desc=f"Rx-{active_tid}",
                             unit="B", unit_scale=True, leave=True,
                         )
+                    # bar already accounts for current offset, skip update
+                    prev_offset = receiver.offset
 
                 # Update tqdm progress bar
                 advanced = receiver.offset - prev_offset

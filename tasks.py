@@ -51,6 +51,7 @@ def _base_args(c, config=None, debug=False, mesh_type=None,
     help={
         "dest": "Destination node ID (64-char hex pubkey)",
         "path": "File or directory to send",
+        "route": "Outbound route as hex repeater hashes (e.g. '5f3a') or 'flood'",
         "debug": "Enable debug logging",
         "config": "Path to config JSON file",
         "mesh-type": "Connection type: serial or tcp",
@@ -60,12 +61,14 @@ def _base_args(c, config=None, debug=False, mesh_type=None,
         "tcp-port": "TCP port",
     }
 )
-def send(c, dest, path, debug=False, config=None, mesh_type=None,
+def send(c, dest, path, route=None, debug=False, config=None, mesh_type=None,
          serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Send a file or directory to a mesh node."""
     parts = _base_args(c, config, debug, mesh_type,
                        serial_port, serial_baud, tcp_host, tcp_port)
     parts += ["send", dest, path]
+    if route:
+        parts += ["--route", route]
     c.run(" ".join(f'"{p}"' if " " in p else p for p in parts), pty=False)
 
 
