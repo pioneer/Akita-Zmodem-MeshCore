@@ -224,6 +224,28 @@ def contacts(c, config=None, mesh_type=None,
     c.run(" ".join(f'"{p}"' if " " in p else p for p in parts), pty=False)
 
 
+@task(
+    help={
+        "dest": "Destination node ID (64-char hex pubkey or prefix)",
+        "route": "Route: hex repeater hashes (e.g. '5f3a'), 'direct', or 'flood'",
+        "config": "Path to config JSON file",
+        "mesh-type": "Connection type: serial or tcp",
+        "serial-port": "Serial device path",
+        "serial-baud": "Serial baud rate",
+        "tcp-host": "TCP host",
+        "tcp-port": "TCP port",
+    }
+)
+def route(c, dest, route, config=None, mesh_type=None,
+          serial_port=None, serial_baud=None,
+          tcp_host=None, tcp_port=None):
+    """Set the outbound route for a contact (direct, flood, or hex path)."""
+    parts = _base_args(c, config, False, mesh_type,
+                       serial_port, serial_baud, tcp_host, tcp_port)
+    parts += ["route", dest, route]
+    c.run(" ".join(f'"{p}"' if " " in p else p for p in parts), pty=False)
+
+
 @task
 def deps(c):
     """Install all dependencies (runtime + dev)."""
