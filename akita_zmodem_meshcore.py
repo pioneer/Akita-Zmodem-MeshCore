@@ -102,6 +102,17 @@ logging.basicConfig(
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+def _pubkey_match(key_a, key_b):
+    """Check if two pubkey strings match, allowing prefix comparison.
+
+    Meshcore returns a truncated 'pubkey_prefix' (e.g. '5428a882e41b')
+    while the CLI uses the full 64-char hex key.  One must be a prefix
+    of the other for a match.
+    """
+    if not key_a or not key_b:
+        return False
+    return key_a.startswith(key_b) or key_b.startswith(key_a)
+
 def load_config(config_file: str = None):
     """Return configuration dictionary from the given JSON file.
 
@@ -545,10 +556,10 @@ class AkitaZmodemMeshCore:
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
                 active_tid = tid
                 break
-            elif t["state"] == "receiving" and t.get("dest") == src:
+            elif t["state"] == "receiving" and _pubkey_match(t.get("dest"), src):
                 active_tid = tid
                 break
-            elif t["state"] == "sending" and t.get("dest") == src:
+            elif t["state"] == "sending" and _pubkey_match(t.get("dest"), src):
                 active_tid = tid
                 break
         if not active_tid:
@@ -563,6 +574,13 @@ class AkitaZmodemMeshCore:
                 logging.debug(f"[Rx-{active_tid}] delivering {len(data)} bytes to receiver")
                 resp = await asyncio.to_thread(receiver.receive, data)
                 t["bytes"] += len(data)
+
+                # Log filename/path once the Receiver resolves it from START
+                if receiver.filename and "file_logged" not in t:
+                    save_path = receiver.filepath or receiver.filename
+                    logging.info(f"[Rx-{active_tid}] Receiving: {receiver.filename} ({receiver.expected_size:,} bytes) → {save_path}")
+                    t["file_logged"] = True
+
                 logging.debug(f"[Rx-{active_tid}] receiver state={receiver.state} resp_len={len(resp) if resp else 0}")
 
                 if resp:
@@ -674,6 +692,34 @@ class AkitaZmodemMeshCore:
                         except: pass
         if cli_event: cli_event.set()
 
+    async def listen(self, save_dir, overwrite=True):
+        """Listen indefinitely, saving each incoming file to *save_dir*.
+
+        Uses the sender's filename from the zmodem START header.
+        After each transfer completes (or times out), a new receive slot
+        is created automatically.
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        logging.info(f"Listening for incoming files → {os.path.abspath(save_dir)}/")
+
+        while self.running:
+            f_event = asyncio.Event()
+            # Pass the directory; the Receiver will resolve the actual
+            # filename from the START header.
+            tid = self.generate_transfer_id()
+            self.transfers[tid] = {
+                "state": "waiting", "receiver": None, "sync_f": None,
+                "file": save_dir, "dest": None, "start": time.time(),
+                "last_act": time.time(), "bytes": 0,
+                "cli_event": f_event
+            }
+            logging.info(f"[Rx-{tid}] Waiting for next file...")
+
+            await f_event.wait()
+
+            # Log what was received
+            logging.info(f"[Rx-{tid}] Done. Listening for next transfer...")
+
     def cancel_transfer(self, tid):
         if tid in self.transfers:
             t = self.transfers.pop(tid)
@@ -767,6 +813,10 @@ async def main():
     sub.add_parser("status").add_argument("id", type=int)
     sub.add_parser("cancel").add_argument("id", type=int)
 
+    p_listen = sub.add_parser("listen",
+                              help="Listen for incoming files and save them to a directory")
+    p_listen.add_argument("dir", help="Directory to save received files into")
+
     args = parser.parse_args()
 
     if args.debug:
@@ -829,6 +879,9 @@ async def main():
         
         elif args.command == "cancel":
             app.cancel_transfer(args.id)
+
+        elif args.command == "listen":
+            await app.listen(args.dir)
 
         else:
             # Daemon -- the work loops are already running above.  simply sleep

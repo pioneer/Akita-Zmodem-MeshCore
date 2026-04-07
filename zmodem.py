@@ -149,11 +149,20 @@ class Receiver:
         If a path is provided, the Receiver will open/close the file as
         appropriate during the transfer to support resume logic without the
         caller pre-opening the file (which could truncate it).
+
+        If the path is a directory, the Receiver will save the file inside
+        that directory using the filename from the sender's START header.
         """
         if isinstance(fobj_or_path, str):
-            self.filepath = fobj_or_path
+            if os.path.isdir(fobj_or_path):
+                self._save_dir = fobj_or_path
+                self.filepath = None
+            else:
+                self._save_dir = None
+                self.filepath = fobj_or_path
             self.fobj = None
         else:
+            self._save_dir = None
             self.filepath = None
             self.fobj = fobj_or_path
         self._inbuf = bytearray()
@@ -161,6 +170,7 @@ class Receiver:
         self.state = 'waiting'   # waiting for START header
         self.offset = 0
         self.expected_size = None
+        self.filename = None     # set from START header
 
     def is_finished(self):
         return self.state == 'done'
@@ -176,8 +186,18 @@ class Receiver:
             if tp == _START:
                 name_len = struct.unpack("!H", payload[1:3])[0]
                 name = payload[3:3+name_len].decode('utf-8')
+                # Sanitize filename: strip path components to prevent
+                # directory traversal; use only the basename.
+                name = os.path.basename(name)
+                self.filename = name
                 size = struct.unpack("!Q", payload[3+name_len:3+name_len+8])[0]
                 self.expected_size = size
+
+                # If we were given a save directory, resolve the full path
+                # now that we know the filename from the sender.
+                if self._save_dir and name:
+                    self.filepath = os.path.join(self._save_dir, name)
+
                 # decide on resume
                 # Determine existing size from filepath (if available) or
                 # from the provided file object.  If the caller previously
