@@ -262,6 +262,17 @@ class AkitaZmodemMeshCore:
                 logging.info("Connected to MeshCore Network.")
                 self.mesh.subscribe(EventType.CONTACT_MSG_RECV, self._on_mesh_message)
                 self.mesh.subscribe(EventType.ERROR, self._on_mesh_error)
+                # Subscribe to all event types to log any radio activity
+                for attr in dir(EventType):
+                    if attr.startswith('_'):
+                        continue
+                    evt = getattr(EventType, attr)
+                    if evt in (EventType.CONTACT_MSG_RECV, EventType.ERROR):
+                        continue  # already subscribed
+                    try:
+                        self.mesh.subscribe(evt, self._on_any_event)
+                    except Exception:
+                        pass
                 return True
         except Exception as e:
             logging.error(f"Connection Failed: {e}")
@@ -270,6 +281,7 @@ class AkitaZmodemMeshCore:
     async def _on_mesh_message(self, event):
         try:
             payload = event.payload
+            logging.debug(f"[Mesh-Rx] >>> RAW EVENT type={getattr(event, 'type', '?')} payload={payload}")
             logging.debug(f"[Mesh-Rx] raw event payload keys={list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}")
             # Extract Source ID – real meshcore uses 'pubkey_prefix',
             # older/mock versions may use 'from_num' or 'from'.
@@ -303,6 +315,9 @@ class AkitaZmodemMeshCore:
 
     async def _on_mesh_error(self, event):
         logging.warning(f"Mesh Error: {event.payload if hasattr(event, 'payload') else event}")
+
+    async def _on_any_event(self, event):
+        logging.debug(f"[Mesh-Any] event type={getattr(event, 'type', '?')} payload={getattr(event, 'payload', '?')}")
 
     # -------------------------------------------------------------------------
     # Send Logic
