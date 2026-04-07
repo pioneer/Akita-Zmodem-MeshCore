@@ -302,32 +302,26 @@ class AkitaZmodemMeshCore:
         for _k, ct in self.mesh.contacts.items():
             if _pubkey_match(ct.get('public_key', ''), node_key):
                 name = ct.get('adv_name', '')
-                # Outbound route (how we send to them)
-                out_route = self._format_route(
+                route = self._format_route(
                     ct.get('out_path_len', -1),
                     ct.get('out_path', ''),
                     ct.get('out_path_hash_mode', 0),
                 )
-                # Advert route (how their adverts reach us — inbound)
-                adv_route = None
-                try:
-                    full_key = ct.get('public_key', '')
-                    if full_key:
-                        ev = await self.mesh.commands.get_advert_path(full_key)
-                        if ev and hasattr(ev, 'payload') and isinstance(ev.payload, dict):
-                            p = ev.payload
-                            adv_route = self._format_route(
-                                p.get('path_len', -1),
-                                p.get('path', ''),
-                                p.get('path_hash_mode', 0),
-                            )
-                except Exception:
-                    pass
                 label = f'{name} | ' if name else ''
-                parts = [f'Out: {out_route}']
-                if adv_route and adv_route != out_route:
-                    parts.append(f'In: {adv_route}')
-                return f'{label}{" | ".join(parts)}'
+                return f'{label}Route: {route}'
+        return None
+
+    def _get_current_route(self, node_key):
+        """Return the current route string for *node_key* (sync, no fetch)."""
+        if not self.mesh or not getattr(self.mesh, 'contacts', None):
+            return None
+        for _k, ct in self.mesh.contacts.items():
+            if _pubkey_match(ct.get('public_key', ''), node_key):
+                return self._format_route(
+                    ct.get('out_path_len', -1),
+                    ct.get('out_path', ''),
+                    ct.get('out_path_hash_mode', 0),
+                )
         return None
 
     async def _connect_mesh(self):
@@ -595,9 +589,17 @@ class AkitaZmodemMeshCore:
         if TQDM_AVAILABLE:
             pbar = tqdm(total=t["total"], desc=f"Tx-{tid}", unit="B", unit_scale=True, leave=True)
 
+        # Route change detection
+        last_known_route = self._get_current_route(dest)
+
         try:
             while self.running:
                 if await asyncio.to_thread(sender.is_finished):
+                    # Close progress bar before grace wait so average speed
+                    # is not diluted by idle waiting time.
+                    if pbar:
+                        pbar.close()
+                        pbar = None
                     # Grace period: wait for late RESUME requests from
                     # the receiver.  If the receiver missed packets it
                     # will send RESUME, which resets sender back to
@@ -639,6 +641,11 @@ class AkitaZmodemMeshCore:
                         new_offset = sender.offset
                         pbar.n = min(new_offset, t["total"])
                         pbar.refresh()
+                    # Check for route changes
+                    cur_route = self._get_current_route(dest)
+                    if cur_route and cur_route != last_known_route:
+                        logging.info(f"[Tx-{tid}] Route changed: {last_known_route} → {cur_route}")
+                        last_known_route = cur_route
                 else:
                     # No new packet — sender is waiting for ACK from remote
                     now = time.time()
@@ -729,6 +736,7 @@ class AkitaZmodemMeshCore:
                     continue
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
                 t["start"] = time.time()  # reset start to when data actually arrives
+                t["_last_route"] = self._get_current_route(src)
                 route_desc = await self._describe_route(src)
                 if route_desc:
                     logging.info(f"[Rx-{tid}] {route_desc}")
@@ -774,6 +782,12 @@ class AkitaZmodemMeshCore:
                 advanced = receiver.offset - prev_offset
                 if advanced > 0 and t.get("_pbar"):
                     t["_pbar"].update(advanced)
+
+                # Check for route changes on receiver side
+                cur_route = self._get_current_route(t.get("dest", ""))
+                if cur_route and cur_route != t.get("_last_route"):
+                    logging.info(f"[Rx-{active_tid}] Route changed: {t.get('_last_route')} → {cur_route}")
+                    t["_last_route"] = cur_route
 
                 logging.debug(f"[Rx-{active_tid}] receiver state={receiver.state} resp_len={len(resp) if resp else 0}")
 
