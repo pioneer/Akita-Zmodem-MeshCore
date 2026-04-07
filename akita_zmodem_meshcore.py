@@ -651,6 +651,7 @@ class AkitaZmodemMeshCore:
             receiver = t["receiver"]
             try:
                 logging.debug(f"[Rx-{active_tid}] delivering {len(data)} bytes to receiver")
+                prev_offset = receiver.offset
                 resp = await asyncio.to_thread(receiver.receive, data)
                 t["bytes"] += len(data)
 
@@ -659,23 +660,19 @@ class AkitaZmodemMeshCore:
                     save_path = receiver.filepath or receiver.filename
                     logging.info(f"[Rx-{active_tid}] Receiving: {receiver.filename} ({receiver.expected_size:,} bytes) → {save_path}")
                     t["file_logged"] = True
-                    t["_last_progress"] = time.time()
-
-                # Periodic progress output (every 5 seconds)
-                now = time.time()
-                if receiver.expected_size and receiver.expected_size > 0 and t.get("file_logged"):
-                    last_prog = t.get("_last_progress", 0)
-                    if now - last_prog >= 5.0:
-                        pct = min(receiver.offset / receiver.expected_size * 100, 100)
-                        elapsed = now - t["start"]
-                        rate = receiver.offset / elapsed if elapsed > 0 else 0
-                        eta = (receiver.expected_size - receiver.offset) / rate if rate > 0 else 0
-                        logging.info(
-                            f"[Rx-{active_tid}] {receiver.filename}: "
-                            f"{pct:.1f}% ({receiver.offset:,}/{receiver.expected_size:,} bytes) "
-                            f"@ {rate:.0f} B/s  ETA {eta:.0f}s"
+                    # Create tqdm progress bar if available
+                    if TQDM_AVAILABLE and receiver.expected_size:
+                        t["_pbar"] = tqdm(
+                            total=receiver.expected_size,
+                            initial=receiver.offset,
+                            desc=f"Rx-{active_tid}",
+                            unit="B", unit_scale=True, leave=True,
                         )
-                        t["_last_progress"] = now
+
+                # Update tqdm progress bar
+                advanced = receiver.offset - prev_offset
+                if advanced > 0 and t.get("_pbar"):
+                    t["_pbar"].update(advanced)
 
                 logging.debug(f"[Rx-{active_tid}] receiver state={receiver.state} resp_len={len(resp) if resp else 0}")
 
@@ -686,6 +683,8 @@ class AkitaZmodemMeshCore:
                     await self.mesh.commands.send_msg(dst=src, msg=msg_str)
 
                 if await asyncio.to_thread(receiver.is_finished):
+                    if t.get("_pbar"):
+                        t["_pbar"].close()
                     elapsed = time.time() - t["start"]
                     rate = receiver.offset / elapsed if elapsed > 0 else 0
                     logging.info(f"[Rx-{active_tid}] Transfer Complete: {receiver.filename} "
@@ -695,6 +694,8 @@ class AkitaZmodemMeshCore:
                     logging.info(f"[Rx-{active_tid}] File Saved. MD5: {checksum}")
                     self.cancel_transfer(active_tid)
             except Exception as e:
+                if t.get("_pbar"):
+                    t["_pbar"].close()
                 logging.error(f"[Rx-{active_tid}] Zmodem Protocol Error: {e}")
                 self.cancel_transfer(active_tid)
 
@@ -798,6 +799,8 @@ class AkitaZmodemMeshCore:
         Uses the sender's filename from the zmodem START header.
         After each transfer completes (or times out), a new receive slot
         is created automatically.
+
+        When *overwrite* is False, existing files are skipped.
         """
         os.makedirs(save_dir, exist_ok=True)
         logging.info(f"Listening for incoming files → {os.path.abspath(save_dir)}/")
@@ -811,7 +814,8 @@ class AkitaZmodemMeshCore:
                 "state": "waiting", "receiver": None, "sync_f": None,
                 "file": save_dir, "dest": None, "start": time.time(),
                 "last_act": time.time(), "bytes": 0,
-                "cli_event": f_event
+                "cli_event": f_event,
+                "overwrite": overwrite,
             }
             logging.info(f"[Rx-{tid}] Waiting for next file...")
 
@@ -823,6 +827,10 @@ class AkitaZmodemMeshCore:
     def cancel_transfer(self, tid):
         if tid in self.transfers:
             t = self.transfers.pop(tid)
+            # Close tqdm progress bar if present
+            if t.get("_pbar"):
+                try: t["_pbar"].close()
+                except Exception: pass
             # Close any file handles in a thread to avoid blocking the loop
             if t.get("sync_f"):
                 try:
@@ -939,6 +947,8 @@ async def main():
     p_listen = sub.add_parser("listen",
                               help="Listen for incoming files and save them to a directory")
     p_listen.add_argument("dir", help="Directory to save received files into")
+    p_listen.add_argument("--no-overwrite", action="store_true", default=False,
+                          help="Skip files that already exist instead of overwriting")
 
     sub.add_parser("contacts",
                    help="Fetch and display the contact list from the device")
@@ -1007,7 +1017,7 @@ async def main():
             app.cancel_transfer(args.id)
 
         elif args.command == "listen":
-            await app.listen(args.dir)
+            await app.listen(args.dir, overwrite=not args.no_overwrite)
 
         elif args.command == "contacts":
             await app.list_contacts()

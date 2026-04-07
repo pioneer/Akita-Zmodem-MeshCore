@@ -71,6 +71,7 @@ class MockReceiver:
         self._finished = False
         self.filename = None
         self.expected_size = 0
+        self.offset = 0
         self.state = 'waiting'
 
     def receive(self, data):
@@ -80,6 +81,7 @@ class MockReceiver:
                 self.fobj = open(self.filepath, 'wb')
             if self.fobj:
                 self.fobj.write(data)
+            self.offset += len(data)
         self._finished = True
 
     def is_finished(self):

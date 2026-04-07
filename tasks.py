@@ -60,7 +60,7 @@ def _base_args(c, config=None, debug=False, mesh_type=None,
         "tcp-port": "TCP port",
     }
 )
-def send(c, dest, path, debug=True, config=None, mesh_type=None,
+def send(c, dest, path, debug=False, config=None, mesh_type=None,
          serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Send a file or directory to a mesh node."""
     parts = _base_args(c, config, debug, mesh_type,
@@ -83,7 +83,7 @@ def send(c, dest, path, debug=True, config=None, mesh_type=None,
         "tcp-port": "TCP port",
     }
 )
-def receive(c, path, overwrite=False, directory=False, debug=True,
+def receive(c, path, overwrite=False, directory=False, debug=False,
             config=None, mesh_type=None,
             serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Receive a single file or directory from the mesh."""
@@ -100,6 +100,7 @@ def receive(c, path, overwrite=False, directory=False, debug=True,
 @task(
     help={
         "dir": "Directory to save received files into",
+        "no-overwrite": "Skip files that already exist instead of overwriting",
         "debug": "Enable debug logging",
         "config": "Path to config JSON file",
         "mesh-type": "Connection type: serial or tcp",
@@ -109,12 +110,14 @@ def receive(c, path, overwrite=False, directory=False, debug=True,
         "tcp-port": "TCP port",
     }
 )
-def listen(c, dir, debug=True, config=None, mesh_type=None,
+def listen(c, dir, no_overwrite=False, debug=False, config=None, mesh_type=None,
            serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Listen for incoming files and save them to a directory."""
     parts = _base_args(c, config, debug, mesh_type,
                        serial_port, serial_baud, tcp_host, tcp_port)
     parts += ["listen", dir]
+    if no_overwrite:
+        parts.append("--no-overwrite")
     c.run(" ".join(f'"{p}"' if " " in p else p for p in parts), pty=False)
 
 
