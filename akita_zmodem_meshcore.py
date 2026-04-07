@@ -273,6 +273,27 @@ class AkitaZmodemMeshCore:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
 
+    def _describe_route(self, node_key):
+        """Return a human-readable route description for *node_key*."""
+        if not self.mesh or not getattr(self.mesh, 'contacts', None):
+            return None
+        for _k, ct in self.mesh.contacts.items():
+            if _pubkey_match(ct.get('public_key', ''), node_key):
+                name = ct.get('adv_name', '')
+                path_len = ct.get('out_path_len', -1)
+                if path_len == -1:
+                    route = 'FLOOD (no direct path)'
+                elif path_len == 0:
+                    route = 'DIRECT (0 hops)'
+                else:
+                    out_path = ct.get('out_path', '')
+                    route = f'DIRECT ({path_len} hop{"s" if path_len != 1 else ""})'
+                    if out_path:
+                        route += f' path={out_path}'
+                label = f'{name} | ' if name else ''
+                return f'{label}Route: {route}'
+        return None
+
     async def _connect_mesh(self):
         conn_type = self.app_config.get("mesh_connection_type", "serial")
         # Fail fast with a clear exception when the meshcore Python client
@@ -389,6 +410,9 @@ class AkitaZmodemMeshCore:
         
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
         logging.info(f"[Tx-{tid}] Zmodem chunk_size={self.zmodem_chunk_size} (1 frame per mesh message)")
+        route_desc = self._describe_route(dest_node)
+        if route_desc:
+            logging.info(f"[Tx-{tid}] {route_desc}")
 
         try:
             # Open file in thread to avoid blocking loop
@@ -633,6 +657,9 @@ class AkitaZmodemMeshCore:
                     self.cancel_transfer(tid)
                     continue
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
+                route_desc = self._describe_route(src)
+                if route_desc:
+                    logging.info(f"[Rx-{tid}] {route_desc}")
                 active_tid = tid
                 break
             elif t["state"] == "receiving" and _pubkey_match(t.get("dest"), src):
