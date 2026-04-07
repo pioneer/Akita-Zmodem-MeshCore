@@ -424,8 +424,9 @@ class AkitaZmodemMeshCore:
     async def _apply_route(self, dest_node, route):
         """Set the outbound route for *dest_node* before sending.
 
-        *route* is a hex string of repeater hashes (e.g. '5f3a') or
-        the literal 'flood' to reset to flood routing.
+        *route* is a hex string of repeater hashes (e.g. '5f3a'),
+        'flood' to reset to flood routing, or 'direct' to set a
+        zero-hop direct path.
         """
         if not self.mesh or not route:
             return
@@ -438,11 +439,15 @@ class AkitaZmodemMeshCore:
         if not contact:
             logging.warning(f"Contact not found for {dest_node[:12]}; cannot set route")
             return
+        name = contact.get('adv_name', dest_node[:12])
         if route.lower() == 'flood':
-            logging.info(f"Resetting route to FLOOD for {contact.get('adv_name', dest_node[:12])}")
+            logging.info(f"Resetting route to FLOOD for {name}")
             await self.mesh.commands.reset_path(dest_node)
+        elif route.lower() == 'direct':
+            logging.info(f"Setting route to DIRECT for {name}")
+            await self.mesh.commands.change_contact_path(contact, '')
         else:
-            logging.info(f"Setting route to {route} for {contact.get('adv_name', dest_node[:12])}")
+            logging.info(f"Setting route to {route} for {name}")
             await self.mesh.commands.change_contact_path(contact, route)
 
     async def send_file(self, dest_node, filepath, cli_event=None, route=None):
@@ -984,6 +989,14 @@ class AkitaZmodemMeshCore:
             try: await self.mesh.close()
             except: pass
 
+    async def set_route(self, dest_node, route):
+        """Set the outbound route for a contact (standalone, no transfer)."""
+        await self._apply_route(dest_node, route)
+        # Show the resulting route
+        route_desc = await self._describe_route(dest_node)
+        if route_desc:
+            logging.info(route_desc)
+
     async def list_contacts(self):
         """Fetch and print the contact list from the connected device."""
         if not self.mesh:
@@ -1031,8 +1044,8 @@ async def main():
     p_send.add_argument("dest", help="Dest Node ID")
     p_send.add_argument("path", help="File/Dir path")
     p_send.add_argument("--route",
-                        help="Outbound route as hex repeater hashes (e.g. '5f3a') "
-                             "or 'flood' to force flood routing")
+                        help="Outbound route: hex repeater hashes (e.g. '5f3a'), "
+                             "'direct' for zero-hop, or 'flood'")
     
     p_recv = sub.add_parser("receive")
     p_recv.add_argument("path", help="Save path (directory or filename)")
@@ -1051,6 +1064,13 @@ async def main():
 
     sub.add_parser("contacts",
                    help="Fetch and display the contact list from the device")
+
+    p_route = sub.add_parser("route",
+                             help="Set the outbound route for a contact")
+    p_route.add_argument("dest", help="Destination node ID (pubkey or prefix)")
+    p_route.add_argument("route",
+                         help="Route: hex repeater hashes (e.g. '5f3a'), "
+                              "'direct' for zero-hop, or 'flood'")
 
     args = parser.parse_args()
 
@@ -1121,6 +1141,9 @@ async def main():
 
         elif args.command == "contacts":
             await app.list_contacts()
+
+        elif args.command == "route":
+            await app.set_route(args.dest, args.route)
 
         else:
             # Daemon -- the work loops are already running above.  simply sleep
