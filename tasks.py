@@ -184,9 +184,38 @@ def test(c, verbose=False, k=None):
 
 @task
 def lint(c):
-    """Run flake8 linter on the project."""
-    c.run(f"{PYTHON} -m flake8 akita_zmodem_meshcore.py zmodem.py tasks.py tests/",
+    """Run ruff linter/formatter on the project."""
+    c.run(f"{PYTHON} -m ruff check akita_zmodem_meshcore.py zmodem.py tasks.py tests/",
           warn=True, pty=False)
+
+
+@task(help={"fix": "Apply fixes automatically"})
+def fmt(c, fix=False):
+    """Format code with ruff."""
+    cmd = f"{PYTHON} -m ruff format akita_zmodem_meshcore.py zmodem.py tasks.py tests/"
+    if not fix:
+        cmd += " --check"
+    c.run(cmd, warn=True, pty=False)
+
+
+@task(
+    help={
+        "config": "Path to config JSON file",
+        "mesh-type": "Connection type: serial or tcp",
+        "serial-port": "Serial device path",
+        "serial-baud": "Serial baud rate",
+        "tcp-host": "TCP host",
+        "tcp-port": "TCP port",
+    }
+)
+def contacts(c, config=None, mesh_type=None,
+             serial_port=None, serial_baud=None,
+             tcp_host=None, tcp_port=None):
+    """Fetch and display the contact list from the connected mesh device."""
+    parts = _base_args(c, config, False, mesh_type,
+                       serial_port, serial_baud, tcp_host, tcp_port)
+    parts.append("contacts")
+    c.run(" ".join(f'"{p}"' if " " in p else p for p in parts), pty=False)
 
 
 @task

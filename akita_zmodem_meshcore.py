@@ -820,6 +820,27 @@ class AkitaZmodemMeshCore:
             try: await self.mesh.close()
             except: pass
 
+    async def list_contacts(self):
+        """Fetch and print the contact list from the connected device."""
+        if not self.mesh:
+            logging.error("Not connected to mesh.")
+            return
+        await self.mesh.ensure_contacts()
+        contacts = self.mesh.contacts
+        if not contacts:
+            print("No contacts found.")
+            return
+        print(f"{len(contacts)} contact(s):")
+        print()
+        print(f'{"Name":<24} {"Public Key"}')
+        print("-" * 88)
+        for _k, ct in sorted(contacts.items(),
+                             key=lambda x: x[1].get("adv_name", "")):
+            name = ct.get("adv_name", "?")
+            pk = ct.get("public_key", "?")
+            print(f"{name:<24} {pk}")
+        print()
+
 # -----------------------------------------------------------------------------
 # CLI Entry Point
 # -----------------------------------------------------------------------------
@@ -856,6 +877,9 @@ async def main():
     p_listen = sub.add_parser("listen",
                               help="Listen for incoming files and save them to a directory")
     p_listen.add_argument("dir", help="Directory to save received files into")
+
+    sub.add_parser("contacts",
+                   help="Fetch and display the contact list from the device")
 
     args = parser.parse_args()
 
@@ -922,6 +946,9 @@ async def main():
 
         elif args.command == "listen":
             await app.listen(args.dir)
+
+        elif args.command == "contacts":
+            await app.list_contacts()
 
         else:
             # Daemon -- the work loops are already running above.  simply sleep
