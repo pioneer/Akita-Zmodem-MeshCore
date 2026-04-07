@@ -396,7 +396,31 @@ class AkitaZmodemMeshCore:
     # -------------------------------------------------------------------------
     # Send Logic
     # -------------------------------------------------------------------------
-    async def send_file(self, dest_node, filepath, cli_event=None):
+    async def _apply_route(self, dest_node, route):
+        """Set the outbound route for *dest_node* before sending.
+
+        *route* is a hex string of repeater hashes (e.g. '5f3a') or
+        the literal 'flood' to reset to flood routing.
+        """
+        if not self.mesh or not route:
+            return
+        await self.mesh.ensure_contacts()
+        contact = None
+        for _k, ct in (self.mesh.contacts or {}).items():
+            if _pubkey_match(ct.get('public_key', ''), dest_node):
+                contact = ct
+                break
+        if not contact:
+            logging.warning(f"Contact not found for {dest_node[:12]}; cannot set route")
+            return
+        if route.lower() == 'flood':
+            logging.info(f"Resetting route to FLOOD for {contact.get('adv_name', dest_node[:12])}")
+            await self.mesh.commands.reset_path(dest_node)
+        else:
+            logging.info(f"Setting route to {route} for {contact.get('adv_name', dest_node[:12])}")
+            await self.mesh.commands.change_contact_path(contact, route)
+
+    async def send_file(self, dest_node, filepath, cli_event=None, route=None):
         if not self.mesh:
             if cli_event: cli_event.set()
             return None
@@ -413,6 +437,9 @@ class AkitaZmodemMeshCore:
             logging.error(f"File not found: {filepath}")
             if cli_event: cli_event.set()
             return None
+
+        if route:
+            await self._apply_route(dest_node, route)
 
         tid = self.generate_transfer_id()
         fsize = os.path.getsize(filepath)
@@ -754,7 +781,7 @@ class AkitaZmodemMeshCore:
     # -------------------------------------------------------------------------
     # Directory Handling & Management
     # -------------------------------------------------------------------------
-    async def send_directory(self, dest, path, cli_event, cleanup=True):
+    async def send_directory(self, dest, path, cli_event, cleanup=True, route=None):
         # create temporary zip file in system temp directory to avoid cluttering
         # the working directory; the file is deleted when the transfer finishes
         # (or on error).
@@ -790,7 +817,7 @@ class AkitaZmodemMeshCore:
             return None
 
         f_event = asyncio.Event()
-        tid = await self.send_file(dest, zip_name, f_event)
+        tid = await self.send_file(dest, zip_name, f_event, route=route)
 
         try:
             if tid:
@@ -975,6 +1002,9 @@ async def main():
     p_send = sub.add_parser("send")
     p_send.add_argument("dest", help="Dest Node ID")
     p_send.add_argument("path", help="File/Dir path")
+    p_send.add_argument("--route",
+                        help="Outbound route as hex repeater hashes (e.g. '5f3a') "
+                             "or 'flood' to force flood routing")
     
     p_recv = sub.add_parser("receive")
     p_recv.add_argument("path", help="Save path (directory or filename)")
@@ -1037,10 +1067,11 @@ async def main():
 
     try:
         if args.command == "send":
+            route = getattr(args, 'route', None)
             if os.path.isdir(args.path):
-                await app.send_directory(args.dest, args.path, cli_event)
+                await app.send_directory(args.dest, args.path, cli_event, route=route)
             else:
-                await app.send_file(args.dest, args.path, cli_event)
+                await app.send_file(args.dest, args.path, cli_event, route=route)
             await cli_event.wait()
 
         elif args.command == "receive":
