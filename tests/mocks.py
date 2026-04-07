@@ -69,6 +69,9 @@ class MockReceiver:
             self.filepath = None
             self.fobj = fobj_or_path
         self._finished = False
+        self.filename = None
+        self.expected_size = 0
+        self.state = 'waiting'
 
     def receive(self, data):
         # open file on first write when given a path (matches real Receiver)

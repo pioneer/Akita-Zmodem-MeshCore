@@ -77,7 +77,7 @@ DEFAULT_CONFIG = {
     # current implementation; some third‑party zmodem wrappers expose a
     # chunk size parameter so we keep the value here for compatibility.
     "chunk_size": 256,             # Internal Zmodem buffer size (unused)
-    "mesh_packet_chunk_size": 200, # Max payload per mesh packet (LoRa MTU safe)
+    "mesh_packet_chunk_size": 148, # Max b64 chars per mesh packet (must fit radio text limit ~159)
     "timeout": 120,                # Extended timeout for slow links
     "mesh_connection_type": "serial",
     "mesh_serial_port": "/dev/ttyUSB0",
@@ -318,7 +318,7 @@ class AkitaZmodemMeshCore:
                     # to decode first.  Plain text messages will fail
                     # b64decode and fall back to UTF-8 encoding.
                     try:
-                        data = base64.b64decode(txt, validate=True)
+                        data = base64.b64decode(txt)
                     except Exception:
                         data = txt.encode('utf-8', 'ignore')
                 elif isinstance(txt, bytes):
@@ -404,27 +404,54 @@ class AkitaZmodemMeshCore:
         return chunks
 
     async def _send_chunks(self, tid, dest, chunks):
-        """Send a list of base64 chunks over mesh. Returns suggested_timeout_s."""
+        """Send a list of base64 chunks over mesh.
+
+        Retries each chunk on ERR_CODE_TABLE_FULL with exponential
+        backoff.  Returns (ok, suggested_timeout_s) where *ok* is True
+        only if every chunk was accepted by the radio.
+        """
+        TABLE_FULL_MAX_RETRIES = 20
         t = self.transfers[tid]
         suggested_timeout_s = 15.0  # default
         for msg_str in chunks:
-            try:
-                logging.debug(f"[Tx-{tid}] sending b64 chunk ({len(msg_str)} chars)")
-                result = await self.mesh.commands.send_msg(dst=dest, msg=msg_str)
-                if result:
-                    logging.debug(f"[Tx-{tid}] send_msg result: type={result.type} payload={result.payload}")
-                # Use meshcore's suggested_timeout if available
-                st = None
-                if result and hasattr(result, 'payload') and isinstance(result.payload, dict):
-                    st = result.payload.get('suggested_timeout')
-                if st and isinstance(st, (int, float)) and st > 0:
-                    suggested_timeout_s = st / 1000.0
-                t["last_act"] = time.time()
-                await asyncio.sleep(self.tx_delay_s)
-            except Exception as e:
-                logging.warning(f"[Tx-{tid}] Send Fail: {e}")
-                await asyncio.sleep(1.0)
-        return suggested_timeout_s
+            backoff = 1.0  # initial backoff for TABLE_FULL (seconds)
+            for attempt in range(TABLE_FULL_MAX_RETRIES + 1):
+                try:
+                    logging.debug(f"[Tx-{tid}] sending b64 chunk ({len(msg_str)} chars)")
+                    result = await self.mesh.commands.send_msg(dst=dest, msg=msg_str)
+                    if result:
+                        logging.debug(f"[Tx-{tid}] send_msg result: type={result.type} payload={result.payload}")
+
+                    # Detect TABLE_FULL error → wait and retry
+                    is_table_full = False
+                    if result and hasattr(result, 'type') and result.type == EventType.ERROR:
+                        pl = result.payload if hasattr(result, 'payload') else {}
+                        if isinstance(pl, dict) and pl.get('error_code') == 3:
+                            is_table_full = True
+                    if is_table_full:
+                        if attempt < TABLE_FULL_MAX_RETRIES:
+                            logging.debug(f"[Tx-{tid}] TABLE_FULL, backoff {backoff:.1f}s (attempt {attempt+1}/{TABLE_FULL_MAX_RETRIES})")
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 1.5, 15.0)
+                            continue
+                        else:
+                            logging.warning(f"[Tx-{tid}] TABLE_FULL persists after {TABLE_FULL_MAX_RETRIES} retries, skipping chunk")
+                            return False, suggested_timeout_s
+
+                    # Use meshcore's suggested_timeout if available
+                    st = None
+                    if result and hasattr(result, 'payload') and isinstance(result.payload, dict):
+                        st = result.payload.get('suggested_timeout')
+                    if st and isinstance(st, (int, float)) and st > 0:
+                        suggested_timeout_s = st / 1000.0
+                    t["last_act"] = time.time()
+                    await asyncio.sleep(self.tx_delay_s)
+                    break  # chunk sent successfully
+                except Exception as e:
+                    logging.warning(f"[Tx-{tid}] Send Fail: {e}")
+                    await asyncio.sleep(1.0)
+                    break  # non-retryable error
+        return True, suggested_timeout_s
 
     async def _send_loop(self, tid):
         t = self.transfers[tid]
@@ -460,7 +487,10 @@ class AkitaZmodemMeshCore:
                 if packet:
                     logging.debug(f"[Tx-{tid}] zmodem packet size={len(packet)} sender.state={sender.state} offset={sender.offset}")
                     chunks = self._build_chunks(packet)
-                    retry_timeout_s = await self._send_chunks(tid, dest, chunks)
+                    ok, retry_timeout_s = await self._send_chunks(tid, dest, chunks)
+                    if not ok:
+                        logging.error(f"[Tx-{tid}] Failed to send packet (radio queue full), aborting")
+                        break
                     last_chunks = chunks
                     last_send_time = time.time()
                     retry_count = 0
@@ -483,7 +513,7 @@ class AkitaZmodemMeshCore:
                                 break
                             retry_count += 1
                             logging.info(f"[Tx-{tid}] No ACK received after {elapsed:.1f}s, retrying ({retry_count}/{MAX_RETRIES})...")
-                            retry_timeout_s = await self._send_chunks(tid, dest, last_chunks)
+                            ok, retry_timeout_s = await self._send_chunks(tid, dest, last_chunks)
                             last_send_time = time.time()
 
                     await asyncio.sleep(0.1)

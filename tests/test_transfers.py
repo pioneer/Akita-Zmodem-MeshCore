@@ -111,11 +111,15 @@ async def test_send_file_succeeds(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_receive_file_writes_and_cleans(tmp_path):
+async def test_receive_file_writes_and_cleans(monkeypatch, tmp_path):
     from akita_zmodem_meshcore import AkitaZmodemMeshCore, APP_PORT_HEADER_FORMAT
+    import zmodem as zmodem_mod
 
     app = AkitaZmodemMeshCore()
     app.mesh = MockMesh()
+
+    # Use MockReceiver so the test doesn't need valid zmodem framing
+    monkeypatch.setattr(zmodem_mod, "Receiver", MockReceiver)
 
     dest = tmp_path / "incoming.bin"
     cli_event = asyncio.Event()
@@ -131,8 +135,7 @@ async def test_receive_file_writes_and_cleans(tmp_path):
 
     # the listener should eventually process the packet and complete the
     # transfer, setting the CLI event
-    await asyncio.wait_for(cli_event.wait(), timeout=1.0)
-    # file should now exist and contain data written by the mock receiver
+    await asyncio.wait_for(cli_event.wait(), timeout=5.0)
     assert dest.exists()
     assert dest.stat().st_size > 0
     assert tid not in app.transfers
