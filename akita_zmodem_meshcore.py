@@ -273,23 +273,34 @@ class AkitaZmodemMeshCore:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
 
-    def _describe_route(self, node_key):
+    async def _describe_route(self, node_key):
         """Return a human-readable route description for *node_key*."""
-        if not self.mesh or not getattr(self.mesh, 'contacts', None):
+        if not self.mesh:
+            return None
+        try:
+            await self.mesh.ensure_contacts()
+        except Exception:
+            pass
+        if not getattr(self.mesh, 'contacts', None):
             return None
         for _k, ct in self.mesh.contacts.items():
             if _pubkey_match(ct.get('public_key', ''), node_key):
                 name = ct.get('adv_name', '')
                 path_len = ct.get('out_path_len', -1)
                 if path_len == -1:
-                    route = 'FLOOD (no direct path)'
+                    route = 'FLOOD'
                 elif path_len == 0:
-                    route = 'DIRECT (0 hops)'
+                    route = 'DIRECT'
                 else:
                     out_path = ct.get('out_path', '')
-                    route = f'DIRECT ({path_len} hop{"s" if path_len != 1 else ""})'
-                    if out_path:
-                        route += f' path={out_path}'
+                    hash_mode = ct.get('out_path_hash_mode', 0)
+                    hop_hex_len = (hash_mode + 1) * 2  # bytes per hop → hex chars
+                    hops = [out_path[i:i + hop_hex_len]
+                            for i in range(0, len(out_path), hop_hex_len)] if out_path else []
+                    hops = hops[:path_len]  # trim to actual hop count
+                    route = f'PATH ({path_len} hop{"s" if path_len != 1 else ""})'
+                    if hops:
+                        route += ' ' + ' → '.join(hops)
                 label = f'{name} | ' if name else ''
                 return f'{label}Route: {route}'
         return None
@@ -410,7 +421,7 @@ class AkitaZmodemMeshCore:
         
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
         logging.info(f"[Tx-{tid}] Zmodem chunk_size={self.zmodem_chunk_size} (1 frame per mesh message)")
-        route_desc = self._describe_route(dest_node)
+        route_desc = await self._describe_route(dest_node)
         if route_desc:
             logging.info(f"[Tx-{tid}] {route_desc}")
 
@@ -657,7 +668,7 @@ class AkitaZmodemMeshCore:
                     self.cancel_transfer(tid)
                     continue
                 logging.info(f"[Rx-{tid}] Incoming stream from {src} accepted")
-                route_desc = self._describe_route(src)
+                route_desc = await self._describe_route(src)
                 if route_desc:
                     logging.info(f"[Rx-{tid}] {route_desc}")
                 active_tid = tid
