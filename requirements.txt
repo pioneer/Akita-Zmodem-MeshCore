@@ -15,3 +15,6 @@ tqdm>=4.0
 
 # Optional: CRC utilities (not required unless using external zmodem libs)
 crcmod>=1.7
+
+# Task runner
+invoke>=2.0
