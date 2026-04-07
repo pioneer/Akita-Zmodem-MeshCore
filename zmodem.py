@@ -122,6 +122,7 @@ class Sender:
                 except Exception:
                     pass
                 self.state = 'sending'
+                self._finished = False
             elif tp == _RESUME:
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # Clamp resume offset to valid range before seeking
@@ -135,6 +136,7 @@ class Sender:
                 except Exception:
                     pass
                 self.state = 'sending'
+                self._finished = False
             elif tp == _END:
                 self.state = 'finished'
                 self._finished = True

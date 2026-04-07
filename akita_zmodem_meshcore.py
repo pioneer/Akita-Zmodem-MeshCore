@@ -222,6 +222,29 @@ class AkitaZmodemMeshCore:
         self.timeout = self.app_config.get("timeout", DEFAULT_CONFIG["timeout"])
         self.tx_delay_s = self.app_config.get("tx_delay_ms", DEFAULT_CONFIG["tx_delay_ms"]) / 1000.0
 
+        # Derive the zmodem Sender chunk_size so that every framed DATA
+        # packet fits in a *single* mesh message.  If a frame is split
+        # across multiple messages and one is lost, the receiver's byte-
+        # stream framing is permanently corrupted.  Keeping one frame per
+        # message lets the zmodem RESUME mechanism recover from lost
+        # packets gracefully.
+        #
+        # mesh_packet_chunk_size (b64 chars)
+        #   → max_raw = chunk_size * 3 // 4          (raw bytes before b64)
+        #   → max_frame = max_raw - APP_PORT_HEADER   (sans app-port header)
+        #   → max_payload = max_frame - 8              (sans frame len+crc)
+        #   → max_file_data = max_payload - 9          (sans DATA type+offset)
+        max_raw = self.mesh_packet_chunk_size * 3 // 4
+        max_frame = max_raw - APP_PORT_HEADER_SIZE
+        self.zmodem_chunk_size = max_frame - 8 - 9  # frame overhead + DATA header
+        if self.zmodem_chunk_size <= 0:
+            raise ValueError(
+                f"mesh_packet_chunk_size ({self.mesh_packet_chunk_size}) is too "
+                f"small to fit even one byte of file data per message"
+            )
+        logging.debug(f"Derived zmodem_chunk_size={self.zmodem_chunk_size} from "
+                      f"mesh_packet_chunk_size={self.mesh_packet_chunk_size}")
+
         # update module globals so tests relying on them remain valid
         global config_data, ZMODEM_APP_PORT, MESH_PACKET_CHUNK_SIZE, TIMEOUT, TX_DELAY_S
         config_data = base
@@ -365,14 +388,14 @@ class AkitaZmodemMeshCore:
         checksum = await asyncio.to_thread(calculate_md5, filepath)
         
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
+        logging.info(f"[Tx-{tid}] Zmodem chunk_size={self.zmodem_chunk_size} (1 frame per mesh message)")
 
         try:
             # Open file in thread to avoid blocking loop
             sync_f = await asyncio.to_thread(open, filepath, "rb")
-            # let the sender know the configured chunk size (legacy key
-            # "chunk_size", kept for compatibility)
-            sz = self.app_config.get("chunk_size", DEFAULT_CONFIG["chunk_size"])
-            sender = await asyncio.to_thread(zmodem.Sender, sync_f, sz)
+            # let the sender use the auto-computed chunk_size that
+            # guarantees every frame fits in one mesh message.
+            sender = await asyncio.to_thread(zmodem.Sender, sync_f, self.zmodem_chunk_size)
         except Exception as e:
             logging.error(f"Zmodem Init Error: {e}")
             if 'sync_f' in locals() and sync_f: sync_f.close()
@@ -483,8 +506,24 @@ class AkitaZmodemMeshCore:
         try:
             while self.running:
                 if await asyncio.to_thread(sender.is_finished):
-                    logging.info(f"[Tx-{tid}] Transfer Complete.")
-                    break
+                    # Grace period: wait for late RESUME requests from
+                    # the receiver.  If the receiver missed packets it
+                    # will send RESUME, which resets sender back to
+                    # 'sending'.  We check periodically.
+                    grace = retry_timeout_s * 2
+                    logging.info(f"[Tx-{tid}] All data sent. Waiting {grace:.0f}s for remote confirmation...")
+                    grace_start = time.time()
+                    while time.time() - grace_start < grace and self.running:
+                        await asyncio.sleep(0.5)
+                        if not await asyncio.to_thread(sender.is_finished):
+                            logging.info(f"[Tx-{tid}] RESUME received, re-entering send loop.")
+                            break
+                    else:
+                        logging.info(f"[Tx-{tid}] Transfer Complete.")
+                        break
+                    # If we broke out of the inner while (RESUME arrived),
+                    # continue the outer sending loop.
+                    continue
 
                 # Overall transfer timeout
                 if time.time() - t["start"] > effective_timeout:
