@@ -262,6 +262,14 @@ class AkitaZmodemMeshCore:
                 logging.info("Connected to MeshCore Network.")
                 self.mesh.subscribe(EventType.CONTACT_MSG_RECV, self._on_mesh_message)
                 self.mesh.subscribe(EventType.ERROR, self._on_mesh_error)
+                # Meshcore doesn't deliver messages automatically — we must
+                # enable auto-fetching so that MESSAGES_WAITING triggers
+                # actual message retrieval and fires CONTACT_MSG_RECV.
+                try:
+                    await self.mesh.start_auto_message_fetching()
+                    logging.info("Auto message fetching enabled.")
+                except Exception as e:
+                    logging.warning(f"Could not enable auto message fetching: {e}")
                 # Subscribe to all event types to log any radio activity
                 for attr in dir(EventType):
                     if attr.startswith('_'):
