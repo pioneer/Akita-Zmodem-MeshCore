@@ -78,7 +78,7 @@ DEFAULT_CONFIG = {
     # chunk size parameter so we keep the value here for compatibility.
     "chunk_size": 256,             # Internal Zmodem buffer size (unused)
     "mesh_packet_chunk_size": 148, # Max b64 chars per mesh packet (must fit radio text limit ~159)
-    "timeout": 120,                # Extended timeout for slow links
+    "timeout": 3600,               # Overall timeout (auto-extended for large files)
     "mesh_connection_type": "serial",
     "mesh_serial_port": "/dev/ttyUSB0",
     "mesh_serial_baud": 115200,
@@ -445,7 +445,12 @@ class AkitaZmodemMeshCore:
                     if st and isinstance(st, (int, float)) and st > 0:
                         suggested_timeout_s = st / 1000.0
                     t["last_act"] = time.time()
-                    await asyncio.sleep(self.tx_delay_s)
+                    # Adaptive pacing: use radio's suggested_timeout / 5
+                    # to avoid TABLE_FULL.  On typical mesh radios this
+                    # yields ~2 s between chunks instead of the default
+                    # tx_delay_ms (150 ms) which saturates the queue.
+                    delay = max(self.tx_delay_s, suggested_timeout_s / 5)
+                    await asyncio.sleep(delay)
                     break  # chunk sent successfully
                 except Exception as e:
                     logging.warning(f"[Tx-{tid}] Send Fail: {e}")
@@ -464,7 +469,12 @@ class AkitaZmodemMeshCore:
         last_chunks = []          # b64 chunks of last packet, for retry
         last_send_time = None
         idle_log_time = 0         # rate-limit idle debug logs
-        
+
+        # Dynamic timeout: at ~68 B/s (typical mesh radio) an 82 KB file
+        # takes ~20 min.  Auto-extend so the configured value is a floor.
+        effective_timeout = max(self.timeout, t["total"] / 30 + 120)
+        logging.info(f"[Tx-{tid}] Effective timeout: {effective_timeout:.0f}s (~{effective_timeout/60:.0f} min)")
+
         # Progress Bar
         pbar = None
         if TQDM_AVAILABLE:
@@ -477,8 +487,8 @@ class AkitaZmodemMeshCore:
                     break
 
                 # Overall transfer timeout
-                if time.time() - t["start"] > self.timeout:
-                    logging.error(f"[Tx-{tid}] Transfer timed out after {self.timeout}s")
+                if time.time() - t["start"] > effective_timeout:
+                    logging.error(f"[Tx-{tid}] Transfer timed out after {effective_timeout:.0f}s")
                     break
 
                 # Get packet from Zmodem
