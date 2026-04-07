@@ -690,7 +690,8 @@ class AkitaZmodemMeshCore:
                     rate = receiver.offset / elapsed if elapsed > 0 else 0
                     logging.info(f"[Rx-{active_tid}] Transfer Complete: {receiver.filename} "
                                  f"({receiver.offset:,} bytes in {elapsed:.0f}s, {rate:.0f} B/s)")
-                    checksum = await asyncio.to_thread(calculate_md5, t["file"])
+                    saved_path = receiver.filepath or t["file"]
+                    checksum = await asyncio.to_thread(calculate_md5, saved_path)
                     logging.info(f"[Rx-{active_tid}] File Saved. MD5: {checksum}")
                     self.cancel_transfer(active_tid)
             except Exception as e:
