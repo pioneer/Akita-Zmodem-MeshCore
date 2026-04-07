@@ -620,6 +620,23 @@ class AkitaZmodemMeshCore:
                     save_path = receiver.filepath or receiver.filename
                     logging.info(f"[Rx-{active_tid}] Receiving: {receiver.filename} ({receiver.expected_size:,} bytes) → {save_path}")
                     t["file_logged"] = True
+                    t["_last_progress"] = time.time()
+
+                # Periodic progress output (every 5 seconds)
+                now = time.time()
+                if receiver.expected_size and receiver.expected_size > 0 and t.get("file_logged"):
+                    last_prog = t.get("_last_progress", 0)
+                    if now - last_prog >= 5.0:
+                        pct = min(receiver.offset / receiver.expected_size * 100, 100)
+                        elapsed = now - t["start"]
+                        rate = receiver.offset / elapsed if elapsed > 0 else 0
+                        eta = (receiver.expected_size - receiver.offset) / rate if rate > 0 else 0
+                        logging.info(
+                            f"[Rx-{active_tid}] {receiver.filename}: "
+                            f"{pct:.1f}% ({receiver.offset:,}/{receiver.expected_size:,} bytes) "
+                            f"@ {rate:.0f} B/s  ETA {eta:.0f}s"
+                        )
+                        t["_last_progress"] = now
 
                 logging.debug(f"[Rx-{active_tid}] receiver state={receiver.state} resp_len={len(resp) if resp else 0}")
 
@@ -630,7 +647,10 @@ class AkitaZmodemMeshCore:
                     await self.mesh.commands.send_msg(dst=src, msg=msg_str)
 
                 if await asyncio.to_thread(receiver.is_finished):
-                    logging.info(f"[Rx-{active_tid}] Transfer Complete.")
+                    elapsed = time.time() - t["start"]
+                    rate = receiver.offset / elapsed if elapsed > 0 else 0
+                    logging.info(f"[Rx-{active_tid}] Transfer Complete: {receiver.filename} "
+                                 f"({receiver.offset:,} bytes in {elapsed:.0f}s, {rate:.0f} B/s)")
                     checksum = await asyncio.to_thread(calculate_md5, t["file"])
                     logging.info(f"[Rx-{active_tid}] File Saved. MD5: {checksum}")
                     self.cancel_transfer(active_tid)
