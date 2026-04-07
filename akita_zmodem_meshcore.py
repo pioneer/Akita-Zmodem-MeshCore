@@ -578,7 +578,10 @@ class AkitaZmodemMeshCore:
                     last_chunks = chunks
                     last_send_time = time.time()
                     retry_count = 0
-                    if pbar: pbar.update(len(packet))
+                    if pbar:
+                        new_offset = sender.offset
+                        pbar.n = min(new_offset, t["total"])
+                        pbar.refresh()
                 else:
                     # No new packet — sender is waiting for ACK from remote
                     now = time.time()
