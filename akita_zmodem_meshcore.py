@@ -858,7 +858,9 @@ class AkitaZmodemMeshCore:
                              key=lambda x: x[1].get("adv_name", "")):
             name = ct.get("adv_name", "?")
             pk = ct.get("public_key", "?")
-            print(f"{name:<24} {pk}")
+            # Replace characters the console can't encode (e.g. emoji on Windows cp1252)
+            safe_name = name.encode(sys.stdout.encoding or "utf-8", "replace").decode(sys.stdout.encoding or "utf-8", "replace")
+            print(f"{safe_name:<24} {pk}")
         print()
 
 # -----------------------------------------------------------------------------
