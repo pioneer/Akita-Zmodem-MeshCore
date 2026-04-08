@@ -59,15 +59,11 @@ class Sender:
         self.filesize = os.fstat(fobj.fileno()).st_size
         self.filename = os.path.basename(fobj.name)
         self.offset = 0
+        self.acked_offset = 0    # last confirmed position from receiver
         self._finished = False
         self._queue = []      # outgoing packet queue
         self._inbuf = bytearray()
         self.state = 'init'
-
-    @property
-    def acked_offset(self):
-        """In classic stop-and-wait, offset always equals acked position."""
-        return self.offset
 
     def is_finished(self):
         return self._finished
@@ -83,6 +79,9 @@ class Sender:
             self.state = 'waiting_ack'
             return self._queue.pop(0)
         if self.state == 'sending':
+            # Stop-and-wait: don't send next chunk until previous is ACKed
+            if self.offset > self.acked_offset:
+                return b""
             # ensure file position matches current offset
             try:
                 self.fobj.seek(self.offset)
@@ -112,19 +111,24 @@ class Sender:
             tp = payload[:1]
             if tp == _ACK:
                 off = struct.unpack("!Q", payload[1:9])[0]
-                # remote acknowledges up to off; update our send offset to match
-                # and position the file accordingly. Clamp to valid range.
                 if off < 0:
                     off = 0
                 if off > self.filesize:
                     off = self.filesize
-                self.offset = off
-                try:
-                    self.fobj.seek(self.offset)
-                except Exception:
-                    pass
-                self.state = 'sending'
-                self._finished = False
+                if self.state == 'waiting_ack':
+                    # Initial ACK after START (or resume): set both offsets
+                    self.offset = off
+                    self.acked_offset = off
+                    try:
+                        self.fobj.seek(self.offset)
+                    except Exception:
+                        pass
+                    self.state = 'sending'
+                    self._finished = False
+                else:
+                    # Data ACK: only advance acked_offset (ignore stale/dup)
+                    if off > self.acked_offset:
+                        self.acked_offset = off
             elif tp == _RESUME:
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # Clamp resume offset to valid range before seeking
@@ -133,6 +137,7 @@ class Sender:
                 if off > self.filesize:
                     off = self.filesize
                 self.offset = off
+                self.acked_offset = off
                 try:
                     self.fobj.seek(off)
                 except Exception:
@@ -150,8 +155,12 @@ class Sender:
         return _frame(_END)
 
     def stall_rewind(self):
-        """No-op in classic mode (offset is always at acked position)."""
-        pass
+        """Rewind send position to last acked offset (for stall recovery)."""
+        self.offset = self.acked_offset
+        try:
+            self.fobj.seek(self.offset)
+        except Exception:
+            pass
 
 
 class Receiver:
