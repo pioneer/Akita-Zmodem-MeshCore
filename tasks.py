@@ -21,7 +21,7 @@ SCRIPT = "akita_zmodem_meshcore.py"
 CONFIG_FILE = "akita_zmodem_meshcore_config.json"
 
 
-def _base_args(c, config=None, debug=False, mesh_type=None,
+def _base_args(c, config=None, debug=False, log_file=None, mesh_type=None,
                serial_port=None, serial_baud=None,
                tcp_host=None, tcp_port=None):
     """Build the common CLI prefix."""
@@ -30,6 +30,8 @@ def _base_args(c, config=None, debug=False, mesh_type=None,
         parts += ["--config", config]
     if debug:
         parts.append("--debug")
+    if log_file:
+        parts += ["--log-file", log_file]
     if mesh_type:
         parts += ["--mesh-type", mesh_type]
     if serial_port:
@@ -53,6 +55,7 @@ def _base_args(c, config=None, debug=False, mesh_type=None,
         "path": "File or directory to send",
         "route": "Outbound route as hex repeater hashes (e.g. '5f3a') or 'flood'",
         "debug": "Enable debug logging",
+        "log-file": "Write debug log to file (console stays normal)",
         "config": "Path to config JSON file",
         "mesh-type": "Connection type: serial or tcp",
         "serial-port": "Serial device path",
@@ -61,10 +64,10 @@ def _base_args(c, config=None, debug=False, mesh_type=None,
         "tcp-port": "TCP port",
     }
 )
-def send(c, dest, path, route=None, debug=False, config=None, mesh_type=None,
+def send(c, dest, path, route=None, debug=False, log_file=None, config=None, mesh_type=None,
          serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Send a file or directory to a mesh node."""
-    parts = _base_args(c, config, debug, mesh_type,
+    parts = _base_args(c, config, debug, log_file, mesh_type,
                        serial_port, serial_baud, tcp_host, tcp_port)
     parts += ["send", dest, path]
     if route:
@@ -78,6 +81,7 @@ def send(c, dest, path, route=None, debug=False, config=None, mesh_type=None,
         "overwrite": "Overwrite existing files",
         "directory": "Force treat path as directory",
         "debug": "Enable debug logging",
+        "log-file": "Write debug log to file (console stays normal)",
         "config": "Path to config JSON file",
         "mesh-type": "Connection type: serial or tcp",
         "serial-port": "Serial device path",
@@ -87,10 +91,10 @@ def send(c, dest, path, route=None, debug=False, config=None, mesh_type=None,
     }
 )
 def receive(c, path, overwrite=False, directory=False, debug=False,
-            config=None, mesh_type=None,
+            log_file=None, config=None, mesh_type=None,
             serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Receive a single file or directory from the mesh."""
-    parts = _base_args(c, config, debug, mesh_type,
+    parts = _base_args(c, config, debug, log_file, mesh_type,
                        serial_port, serial_baud, tcp_host, tcp_port)
     parts += ["receive", path]
     if overwrite:
@@ -105,6 +109,7 @@ def receive(c, path, overwrite=False, directory=False, debug=False,
         "dir": "Directory to save received files into",
         "no-overwrite": "Skip files that already exist instead of overwriting",
         "debug": "Enable debug logging",
+        "log-file": "Write debug log to file (console stays normal)",
         "config": "Path to config JSON file",
         "mesh-type": "Connection type: serial or tcp",
         "serial-port": "Serial device path",
@@ -113,10 +118,10 @@ def receive(c, path, overwrite=False, directory=False, debug=False,
         "tcp-port": "TCP port",
     }
 )
-def listen(c, dir, no_overwrite=False, debug=False, config=None, mesh_type=None,
+def listen(c, dir, no_overwrite=False, debug=False, log_file=None, config=None, mesh_type=None,
            serial_port=None, serial_baud=None, tcp_host=None, tcp_port=None):
     """Listen for incoming files and save them to a directory."""
-    parts = _base_args(c, config, debug, mesh_type,
+    parts = _base_args(c, config, debug, log_file, mesh_type,
                        serial_port, serial_baud, tcp_host, tcp_port)
     parts += ["listen", dir]
     if no_overwrite:

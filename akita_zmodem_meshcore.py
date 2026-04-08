@@ -86,7 +86,7 @@ DEFAULT_CONFIG = {
     "mesh_tcp_port": 4403,
     "tx_delay_ms": 150,            # Throttle to prevent radio buffer saturation
     "window_size": 4,              # Sliding window: chunks sender can have in-flight
-    "ack_interval": 4              # Receiver ACKs every N chunks (reduces return traffic)
+    "ack_interval": 2              # Receiver ACKs every N chunks (reduces return traffic)
 }
 
 APP_PORT_HEADER_FORMAT = "!H" 
@@ -583,6 +583,11 @@ class AkitaZmodemMeshCore:
 
         MAX_RETRIES = 3
         retry_timeout_s = 15.0   # updated from meshcore suggested_timeout
+        # Stall timeout must cover: time to fill the window (window_size
+        # sends, each paced ~retry_timeout/5) plus a full round-trip for
+        # the ACK.  Scale with window_size so larger windows don't trigger
+        # false stalls.
+        stall_timeout_s = retry_timeout_s * (self.window_size + 1)
         retry_count = 0
         last_chunks = []          # b64 chunks of last packet, for retry
         last_send_time = None
@@ -599,6 +604,8 @@ class AkitaZmodemMeshCore:
         pbar = None
         if TQDM_AVAILABLE:
             pbar = tqdm(total=t["total"], desc=f"Tx-{tid}", unit="B", unit_scale=True, leave=True)
+        # Store ref so the ACK handler can update the bar when acks arrive
+        t["_tx_pbar"] = pbar
 
         # Route change detection
         last_known_route = self._get_current_route(dest)
@@ -611,6 +618,7 @@ class AkitaZmodemMeshCore:
                     if pbar:
                         pbar.close()
                         pbar = None
+                        t["_tx_pbar"] = None
                     # Grace period: wait for late RESUME requests from
                     # the receiver.  If the receiver missed packets it
                     # will send RESUME, which resets sender back to
@@ -645,12 +653,16 @@ class AkitaZmodemMeshCore:
                     if not ok:
                         logging.error(f"[Tx-{tid}] Failed to send packet (radio queue full), aborting")
                         break
+                    # Update stall timeout when radio reports a new suggested_timeout
+                    stall_timeout_s = retry_timeout_s * (self.window_size + 1)
                     last_chunks = chunks
                     last_send_time = time.time()
                     retry_count = 0
                     if pbar:
-                        new_offset = sender.offset
-                        pbar.n = min(new_offset, t["total"])
+                        # Use acked_offset (confirmed progress) for smooth,
+                        # monotonic bar — sender.offset can jump ahead or
+                        # rewind with the sliding window.
+                        pbar.n = min(sender.acked_offset, t["total"])
                         pbar.refresh()
                     # Check for route changes
                     cur_route = self._get_current_route(dest)
@@ -689,12 +701,12 @@ class AkitaZmodemMeshCore:
 
                     # Sliding window stall: window full but no ACK progress
                     elif sender.state == 'sending' and \
-                         now - last_ack_progress_time >= retry_timeout_s:
+                         now - last_ack_progress_time >= stall_timeout_s:
                         if retry_count >= MAX_RETRIES:
                             logging.error(f"[Tx-{tid}] No ACK progress after {MAX_RETRIES} retries. Giving up.")
                             break
                         retry_count += 1
-                        logging.info(f"[Tx-{tid}] Window stall: no ACK progress for {retry_timeout_s:.1f}s, "
+                        logging.info(f"[Tx-{tid}] Window stall: no ACK progress for {stall_timeout_s:.1f}s, "
                                      f"rewinding to offset {sender.acked_offset} ({retry_count}/{MAX_RETRIES})")
                         sender.stall_rewind()
                         last_ack_progress_time = now
@@ -705,6 +717,7 @@ class AkitaZmodemMeshCore:
             logging.error(f"[Tx-{tid}] Error: {e}")
         finally:
             if pbar: pbar.close()
+            t["_tx_pbar"] = None
             self.cancel_transfer(tid)
 
     # -------------------------------------------------------------------------
@@ -851,6 +864,10 @@ class AkitaZmodemMeshCore:
                 logging.debug(f"[Tx-{active_tid}] delivering {len(data)} bytes to sender")
                 resp = await asyncio.to_thread(t["sender"].receive, data)
                 logging.debug(f"[Tx-{active_tid}] sender returned {len(resp) if resp else 0} bytes")
+                # Update progress bar with confirmed (acked) offset
+                if t.get("_tx_pbar"):
+                    t["_tx_pbar"].n = min(t["sender"].acked_offset, t.get("total", 0))
+                    t["_tx_pbar"].refresh()
                 if resp:
                     resp_payload = struct.pack(APP_PORT_HEADER_FORMAT, self.zmodem_app_port) + resp
                     msg_str = base64.b64encode(resp_payload).decode('ascii')
@@ -1083,6 +1100,8 @@ async def main():
                         help="TCP port for meshcore connection (tcp)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--log-file", dest="log_file", metavar="FILE",
+                        help="Write debug-level log to FILE (console stays normal)")
     
     sub = parser.add_subparsers(dest="command")
     
@@ -1120,6 +1139,18 @@ async def main():
 
     args = parser.parse_args()
 
+    if args.log_file:
+        # Debug to file, console stays at INFO
+        fh = logging.FileHandler(args.log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger().addHandler(fh)
+        logging.getLogger('meshcore').setLevel(logging.DEBUG)
+        # Keep the existing console handler at INFO
+        for h in logging.getLogger().handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                h.setLevel(logging.INFO)
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger('meshcore').setLevel(logging.DEBUG)
