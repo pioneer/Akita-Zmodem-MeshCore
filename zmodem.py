@@ -197,6 +197,7 @@ class Receiver:
         self.filename = None     # set from START header
         self.ack_interval = max(1, ack_interval)
         self._chunks_since_ack = 0
+        self._pending_chunks = {}  # buffer for out-of-order DATA: {offset: data}
 
     def is_finished(self):
         return self.state == 'done'
@@ -243,6 +244,7 @@ class Receiver:
                     except OSError:
                         existing = 0
 
+                self._pending_chunks.clear()
                 if existing and existing < size:
                     # resume: open for append
                     self.offset = existing
@@ -271,34 +273,29 @@ class Receiver:
             elif tp == _DATA and self.state == 'receiving':
                 off = struct.unpack("!Q", payload[1:9])[0]
                 chunk = payload[9:]
-                if off != self.offset:
-                    # out-of-order: request resume immediately
-                    resp = _RESUME + struct.pack("!Q", self.offset)
-                    self._chunks_since_ack = 0
-                    out += _frame(resp)
-                else:
-                    # Ensure we have an open file handle before writing
-                    if self.fobj is None:
-                        # attempt to open in append mode
-                        try:
-                            self.fobj = open(self.filepath, 'ab') if self.filepath else None
-                        except Exception:
-                            # cannot open file; request resume (no change)
-                            resp = _RESUME + struct.pack("!Q", self.offset)
-                            out += _frame(resp)
-                            continue
-                    self.fobj.write(chunk)
-                    self.offset += len(chunk)
-                    self._chunks_since_ack += 1
-                    # Delayed ACK: only send ACK every ack_interval chunks,
-                    # or when the entire file has been received.
-                    if self._chunks_since_ack >= self.ack_interval or \
-                       (self.expected_size and self.offset >= self.expected_size):
-                        resp = _ACK + struct.pack("!Q", self.offset)
+                if off == self.offset:
+                    # In-order: write and flush any buffered chunks
+                    if not self._write_sequential(chunk):
+                        resp = _RESUME + struct.pack("!Q", self.offset)
                         self._chunks_since_ack = 0
                         out += _frame(resp)
+                        continue
+                    self._flush_pending()
+                elif off > self.offset:
+                    # Out-of-order (ahead): buffer for later
+                    self._pending_chunks[off] = chunk
+                # else: duplicate/stale chunk, discard silently
+                self._chunks_since_ack += 1
+                # Delayed ACK: send ACK every ack_interval chunks,
+                # or when the entire file has been received.
+                if self._chunks_since_ack >= self.ack_interval or \
+                   (self.expected_size and self.offset >= self.expected_size):
+                    resp = _ACK + struct.pack("!Q", self.offset)
+                    self._chunks_since_ack = 0
+                    out += _frame(resp)
             elif tp == _END and self.state == 'receiving':
                 self.state = 'done'
+                self._pending_chunks.clear()
                 try:
                     if self.fobj:
                         self.fobj.close()
@@ -307,3 +304,23 @@ class Receiver:
                 # final ack
                 out += _frame(_END)
         return out
+
+    def _write_sequential(self, chunk):
+        """Write *chunk* at current offset and advance. Returns True on success."""
+        if self.fobj is None:
+            try:
+                self.fobj = open(self.filepath, 'ab') if self.filepath else None
+            except Exception:
+                return False
+        if self.fobj:
+            self.fobj.write(chunk)
+            self.offset += len(chunk)
+            return True
+        return False
+
+    def _flush_pending(self):
+        """Write buffered out-of-order chunks that are now contiguous."""
+        while self.offset in self._pending_chunks:
+            chunk = self._pending_chunks.pop(self.offset)
+            if not self._write_sequential(chunk):
+                break

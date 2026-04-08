@@ -43,7 +43,7 @@ def setup_env(tmp_path, monkeypatch):
         # returns an object with the same interface as the real sender
         return MockSender(fobj)
 
-    def mock_receiver_factory(fobj):
+    def mock_receiver_factory(fobj, *args, **kwargs):
         return MockReceiver(fobj)
 
     mock_zmod = types.SimpleNamespace(Sender=mock_sender_factory, Receiver=mock_receiver_factory)
