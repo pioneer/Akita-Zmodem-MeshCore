@@ -56,12 +56,14 @@ def _deframe(buffer: bytearray):
 
 
 class Sender:
-    def __init__(self, fobj, chunk_size: int = 256):
+    def __init__(self, fobj, chunk_size: int = 256, window_size: int = 1):
         self.fobj = fobj
         self.chunk_size = chunk_size
         self.filesize = os.fstat(fobj.fileno()).st_size
         self.filename = os.path.basename(fobj.name)
-        self.offset = 0
+        self.offset = 0          # send position (how far we've read/sent)
+        self.acked_offset = 0    # last acknowledged position from receiver
+        self.window_size = max(1, window_size)
         self._finished = False
         self._queue = []      # outgoing packet queue
         self._inbuf = bytearray()
@@ -81,6 +83,9 @@ class Sender:
             self.state = 'waiting_ack'
             return self._queue.pop(0)
         if self.state == 'sending':
+            # Check sliding window: don't send if too far ahead of acked
+            if self.offset - self.acked_offset >= self.window_size * self.chunk_size:
+                return b""  # window full, wait for ACKs
             # ensure file position matches current offset
             try:
                 self.fobj.seek(self.offset)
@@ -110,19 +115,25 @@ class Sender:
             tp = payload[:1]
             if tp == _ACK:
                 off = struct.unpack("!Q", payload[1:9])[0]
-                # remote acknowledges up to off; update our send offset to match
-                # and position the file accordingly. Clamp to valid range.
                 if off < 0:
                     off = 0
                 if off > self.filesize:
                     off = self.filesize
-                self.offset = off
-                try:
-                    self.fobj.seek(self.offset)
-                except Exception:
-                    pass
-                self.state = 'sending'
-                self._finished = False
+                if self.state == 'waiting_ack':
+                    # First ACK after START: initialize both offsets
+                    self.offset = off
+                    self.acked_offset = off
+                    try:
+                        self.fobj.seek(self.offset)
+                    except Exception:
+                        pass
+                    self.state = 'sending'
+                    self._finished = False
+                else:
+                    # Sliding window: only advance acked_offset, don't
+                    # rewind send position
+                    if off > self.acked_offset:
+                        self.acked_offset = off
             elif tp == _RESUME:
                 off = struct.unpack("!Q", payload[1:9])[0]
                 # Clamp resume offset to valid range before seeking
@@ -130,7 +141,10 @@ class Sender:
                     off = 0
                 if off > self.filesize:
                     off = self.filesize
+                # RESUME rewinds both offsets — receiver needs data
+                # from this position
                 self.offset = off
+                self.acked_offset = off
                 try:
                     self.fobj.seek(off)
                 except Exception:
@@ -143,9 +157,17 @@ class Sender:
             # other control frames ignored
         return out
 
+    def stall_rewind(self):
+        """Rewind send position to last acked offset (for stall recovery)."""
+        self.offset = self.acked_offset
+        try:
+            self.fobj.seek(self.offset)
+        except Exception:
+            pass
+
 
 class Receiver:
-    def __init__(self, fobj_or_path):
+    def __init__(self, fobj_or_path, ack_interval=1):
         """Accept either a file-like object or a filepath string.
 
         If a path is provided, the Receiver will open/close the file as
@@ -173,6 +195,8 @@ class Receiver:
         self.offset = 0
         self.expected_size = None
         self.filename = None     # set from START header
+        self.ack_interval = max(1, ack_interval)
+        self._chunks_since_ack = 0
 
     def is_finished(self):
         return self.state == 'done'
@@ -248,8 +272,9 @@ class Receiver:
                 off = struct.unpack("!Q", payload[1:9])[0]
                 chunk = payload[9:]
                 if off != self.offset:
-                    # out-of-order: request resume
+                    # out-of-order: request resume immediately
                     resp = _RESUME + struct.pack("!Q", self.offset)
+                    self._chunks_since_ack = 0
                     out += _frame(resp)
                 else:
                     # Ensure we have an open file handle before writing
@@ -264,8 +289,14 @@ class Receiver:
                             continue
                     self.fobj.write(chunk)
                     self.offset += len(chunk)
-                    resp = _ACK + struct.pack("!Q", self.offset)
-                    out += _frame(resp)
+                    self._chunks_since_ack += 1
+                    # Delayed ACK: only send ACK every ack_interval chunks,
+                    # or when the entire file has been received.
+                    if self._chunks_since_ack >= self.ack_interval or \
+                       (self.expected_size and self.offset >= self.expected_size):
+                        resp = _ACK + struct.pack("!Q", self.offset)
+                        self._chunks_since_ack = 0
+                        out += _frame(resp)
             elif tp == _END and self.state == 'receiving':
                 self.state = 'done'
                 try:

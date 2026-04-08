@@ -84,7 +84,9 @@ DEFAULT_CONFIG = {
     "mesh_serial_baud": 115200,
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
-    "tx_delay_ms": 150             # Throttle to prevent radio buffer saturation
+    "tx_delay_ms": 150,            # Throttle to prevent radio buffer saturation
+    "window_size": 4,              # Sliding window: chunks sender can have in-flight
+    "ack_interval": 4              # Receiver ACKs every N chunks (reduces return traffic)
 }
 
 APP_PORT_HEADER_FORMAT = "!H" 
@@ -245,6 +247,10 @@ class AkitaZmodemMeshCore:
         logging.debug(f"Derived zmodem_chunk_size={self.zmodem_chunk_size} from "
                       f"mesh_packet_chunk_size={self.mesh_packet_chunk_size}")
 
+        # Sliding window parameters
+        self.window_size = int(self.app_config.get("window_size", DEFAULT_CONFIG["window_size"]))
+        self.ack_interval = int(self.app_config.get("ack_interval", DEFAULT_CONFIG["ack_interval"]))
+
         # update module globals so tests relying on them remain valid
         global config_data, ZMODEM_APP_PORT, MESH_PACKET_CHUNK_SIZE, TIMEOUT, TX_DELAY_S
         config_data = base
@@ -264,6 +270,8 @@ class AkitaZmodemMeshCore:
             ("mesh_packet_chunk_size", int),
             ("timeout", (int, float)),
             ("tx_delay_ms", (int, float)),
+            ("window_size", int),
+            ("ack_interval", int),
         ]
         for key, typ in fields:
             val = self.app_config.get(key)
@@ -472,6 +480,7 @@ class AkitaZmodemMeshCore:
         
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
         logging.info(f"[Tx-{tid}] Zmodem chunk_size={self.zmodem_chunk_size} (1 frame per mesh message)")
+        logging.info(f"[Tx-{tid}] Sliding window: size={self.window_size} ack_interval={self.ack_interval}")
         route_desc = await self._describe_route(dest_node)
         if route_desc:
             logging.info(f"[Tx-{tid}] {route_desc}")
@@ -481,7 +490,7 @@ class AkitaZmodemMeshCore:
             sync_f = await asyncio.to_thread(open, filepath, "rb")
             # let the sender use the auto-computed chunk_size that
             # guarantees every frame fits in one mesh message.
-            sender = await asyncio.to_thread(zmodem.Sender, sync_f, self.zmodem_chunk_size)
+            sender = await asyncio.to_thread(zmodem.Sender, sync_f, self.zmodem_chunk_size, self.window_size)
         except Exception as e:
             logging.error(f"Zmodem Init Error: {e}")
             if 'sync_f' in locals() and sync_f: sync_f.close()
@@ -578,6 +587,8 @@ class AkitaZmodemMeshCore:
         last_chunks = []          # b64 chunks of last packet, for retry
         last_send_time = None
         idle_log_time = 0         # rate-limit idle debug logs
+        last_acked = 0            # track ACK progress for window stall detection
+        last_ack_progress_time = time.time()
 
         # Dynamic timeout: at ~68 B/s (typical mesh radio) an 82 KB file
         # takes ~20 min.  Auto-extend so the configured value is a floor.
@@ -650,9 +661,18 @@ class AkitaZmodemMeshCore:
                     # No new packet — sender is waiting for ACK from remote
                     now = time.time()
 
+                    # Track ACK progress (sliding window)
+                    cur_acked = sender.acked_offset
+                    if cur_acked != last_acked:
+                        last_acked = cur_acked
+                        last_ack_progress_time = now
+                        retry_count = 0
+
                     # Rate-limit idle debug logs to every 5 seconds
                     if now - idle_log_time >= 5.0:
-                        logging.debug(f"[Tx-{tid}] waiting for ACK, sender.state={sender.state} retries={retry_count}/{MAX_RETRIES}")
+                        logging.debug(f"[Tx-{tid}] waiting for ACK, sender.state={sender.state} "
+                                      f"offset={sender.offset} acked={sender.acked_offset} "
+                                      f"retries={retry_count}/{MAX_RETRIES}")
                         idle_log_time = now
 
                     # Retry logic: resend last packet if ACK not received in time
@@ -666,6 +686,18 @@ class AkitaZmodemMeshCore:
                             logging.info(f"[Tx-{tid}] No ACK received after {elapsed:.1f}s, retrying ({retry_count}/{MAX_RETRIES})...")
                             ok, retry_timeout_s = await self._send_chunks(tid, dest, last_chunks)
                             last_send_time = time.time()
+
+                    # Sliding window stall: window full but no ACK progress
+                    elif sender.state == 'sending' and \
+                         now - last_ack_progress_time >= retry_timeout_s:
+                        if retry_count >= MAX_RETRIES:
+                            logging.error(f"[Tx-{tid}] No ACK progress after {MAX_RETRIES} retries. Giving up.")
+                            break
+                        retry_count += 1
+                        logging.info(f"[Tx-{tid}] Window stall: no ACK progress for {retry_timeout_s:.1f}s, "
+                                     f"rewinding to offset {sender.acked_offset} ({retry_count}/{MAX_RETRIES})")
+                        sender.stall_rewind()
+                        last_ack_progress_time = now
 
                     await asyncio.sleep(0.1)
 
@@ -729,7 +761,7 @@ class AkitaZmodemMeshCore:
                 t["state"] = "receiving"
                 t["sync_f"] = None
                 try:
-                    t["receiver"] = await asyncio.to_thread(zmodem.Receiver, t["file"])
+                    t["receiver"] = await asyncio.to_thread(zmodem.Receiver, t["file"], self.ack_interval)
                 except Exception as e:
                     logging.error(f"[Rx-{tid}] Cannot init receiver for '{t['file']}': {e}")
                     self.cancel_transfer(tid)

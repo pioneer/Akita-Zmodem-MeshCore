@@ -46,6 +46,7 @@ class MockSender:
         self._idx = 0
         self.state = 'init'
         self.offset = 0
+        self.acked_offset = 0
 
     def is_finished(self):
         return self._idx >= len(self.packets)
@@ -61,7 +62,7 @@ class MockSender:
 
 
 class MockReceiver:
-    def __init__(self, fobj_or_path):
+    def __init__(self, fobj_or_path, ack_interval=1):
         if isinstance(fobj_or_path, str):
             self.filepath = fobj_or_path
             self.fobj = None
