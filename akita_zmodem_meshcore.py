@@ -317,15 +317,19 @@ class AkitaZmodemMeshCore:
 
     @staticmethod
     def _calc_stall_timeout(suggested_timeout_s, path_len):
-        """Compute the sliding-window stall timeout dynamically.
+        """Compute the stall timeout dynamically.
 
-        Direct (0 hops): 1× suggested_timeout — the radio's one-way
-        estimate already includes local ACK; one round-trip is plenty.
-        Each additional hop adds ~1× suggested_timeout for the extra
-        relay latency in both directions.  A minimum of 8 s prevents
-        false stalls on very fast links.
+        ``suggested_timeout`` is the radio's **one-way** delivery estimate
+        (includes LoRa airtime + local ACK for that single hop).  A full
+        data→ACK round-trip needs at least 2× that (sender TX + receiver
+        TX of ACK), plus a safety margin.  Each additional hop adds
+        roughly 1× for the relay latency on the return path.
+
+        Formula: 2.5× suggested_timeout × (1 + path_len)
+        The 2.5× covers the round-trip + scheduling jitter.
+        Minimum 15 s to avoid false stalls on very fast direct links.
         """
-        return max(8.0, suggested_timeout_s * (1 + path_len))
+        return max(15.0, suggested_timeout_s * 2.5 * (1 + path_len))
 
     def _format_route(self, path_len, path_hex, hash_mode):
         """Format a single route description from path fields."""
