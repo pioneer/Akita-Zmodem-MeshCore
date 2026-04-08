@@ -664,6 +664,7 @@ class AkitaZmodemMeshCore:
 
         # Progress Bar
         pbar = None
+        pbar_initial_set = False  # tracks whether we've set the resume baseline
         if TQDM_AVAILABLE:
             pbar = tqdm(total=t["total"], desc=f"Tx-{tid}", unit="B", unit_scale=True, leave=True)
         # Store ref so the ACK handler can update the bar when acks arrive
@@ -725,7 +726,15 @@ class AkitaZmodemMeshCore:
                         # Use acked_offset (confirmed progress) for smooth,
                         # monotonic bar — sender.offset can jump ahead or
                         # rewind with the sliding window.
-                        pbar.n = min(sender.acked_offset, t["total"])
+                        cur = min(sender.acked_offset, t["total"])
+                        # On resume, the first ACK jumps acked_offset to the
+                        # resume point.  Set pbar.initial so tqdm computes
+                        # speed only from new bytes, not the resumed portion.
+                        if not pbar_initial_set and cur > 0:
+                            pbar.initial = cur
+                            pbar.last_print_n = cur
+                            pbar_initial_set = True
+                        pbar.n = cur
                         pbar.refresh()
                     # Check for route changes
                     cur_route = self._get_current_route(dest)
