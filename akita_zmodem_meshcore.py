@@ -124,12 +124,16 @@ def _sanitize_root_handlers():
 
     Called after library init (e.g. meshcore) which may silently add
     default StreamHandlers that bypass our tqdm-safe handler and level
-    filtering.
+    filtering.  Also ensures our console handler is still attached
+    (libraries that call ``basicConfig(force=True)`` may remove it).
     """
     root = logging.getLogger()
     for h in list(root.handlers):
         if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) and h is not _console_handler:
             root.removeHandler(h)
+    # Re-attach ours if a library removed it
+    if _console_handler not in root.handlers:
+        root.addHandler(_console_handler)
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -311,6 +315,18 @@ class AkitaZmodemMeshCore:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
 
+    @staticmethod
+    def _calc_stall_timeout(suggested_timeout_s, path_len):
+        """Compute the sliding-window stall timeout dynamically.
+
+        Direct (0 hops): 1× suggested_timeout — the radio's one-way
+        estimate already includes local ACK; one round-trip is plenty.
+        Each additional hop adds ~1× suggested_timeout for the extra
+        relay latency in both directions.  A minimum of 8 s prevents
+        false stalls on very fast links.
+        """
+        return max(8.0, suggested_timeout_s * (1 + path_len))
+
     def _format_route(self, path_len, path_hex, hash_mode):
         """Format a single route description from path fields."""
         if path_len == -1:
@@ -361,6 +377,16 @@ class AkitaZmodemMeshCore:
                     ct.get('out_path_hash_mode', 0),
                 )
         return None
+
+    def _get_path_len(self, node_key):
+        """Return the outbound path length for *node_key*, or 0 for direct/unknown."""
+        if not self.mesh or not getattr(self.mesh, 'contacts', None):
+            return 0
+        for _k, ct in self.mesh.contacts.items():
+            if _pubkey_match(ct.get('public_key', ''), node_key):
+                pl = ct.get('out_path_len', -1)
+                return max(pl, 0)  # -1 (flood) → treat as 0
+        return 0
 
     async def _connect_mesh(self):
         conn_type = self.app_config.get("mesh_connection_type", "serial")
@@ -616,9 +642,13 @@ class AkitaZmodemMeshCore:
 
         MAX_RETRIES = 3
         retry_timeout_s = 15.0   # updated from meshcore suggested_timeout
-        # Stall timeout: safety net for when RESUME-on-gap doesn't fire.
-        # Two round-trips should be plenty for an ACK to arrive.
-        stall_timeout_s = retry_timeout_s * 2
+        # Stall timeout: dynamic based on hop count.
+        # For direct (0 hops): suggested_timeout already covers one-way
+        # radio delivery; we need ~1× for the ACK round-trip.
+        # Each additional hop adds roughly 1× suggested_timeout.
+        path_len = self._get_path_len(dest)
+        stall_timeout_s = self._calc_stall_timeout(retry_timeout_s, path_len)
+        logging.info(f"[Tx-{tid}] Stall timeout: {stall_timeout_s:.1f}s (path_len={path_len})")
         retry_count = 0
         last_chunks = []          # b64 chunks of last packet, for retry
         last_send_time = None
@@ -685,7 +715,8 @@ class AkitaZmodemMeshCore:
                         logging.error(f"[Tx-{tid}] Failed to send packet (radio queue full), aborting")
                         break
                     # Update stall timeout when radio reports a new suggested_timeout
-                    stall_timeout_s = retry_timeout_s * 2
+                    stall_timeout_s = self._calc_stall_timeout(
+                        retry_timeout_s, self._get_path_len(dest))
                     last_chunks = chunks
                     last_send_time = time.time()
                     retry_count = 0
