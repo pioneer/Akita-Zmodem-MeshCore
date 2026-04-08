@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
     "tx_delay_ms": 150,            # Throttle to prevent radio buffer saturation
-    "window_size": 2,              # Sliding window: chunks sender can have in-flight
+    "window_size": 1,              # Stop-and-wait: best for half-duplex mesh radio
     "ack_interval": 1              # Receiver ACKs every N chunks (reduces return traffic)
 }
 
@@ -682,15 +682,22 @@ class AkitaZmodemMeshCore:
                         pbar.close()
                         pbar = None
                         t["_tx_pbar"] = None
-                    # Grace period: wait for late RESUME requests from
-                    # the receiver.  If the receiver missed packets it
-                    # will send RESUME, which resets sender back to
-                    # 'sending'.  We check periodically.
+                    # Grace period: resend ZFIN periodically so the
+                    # receiver can complete even if earlier ZFIN was
+                    # lost on the half-duplex mesh radio.  Also check
+                    # for late RESUME requests from the receiver.
                     grace = retry_timeout_s * 2
-                    logging.info(f"[Tx-{tid}] All data sent. Waiting {grace:.0f}s for remote confirmation...")
+                    zfin_pkt = await asyncio.to_thread(sender.get_zfin_packet)
+                    logging.info(f"[Tx-{tid}] All data sent. Resending ZFIN ({grace:.0f}s grace)...")
                     grace_start = time.time()
+                    zfin_resends = 0
                     while time.time() - grace_start < grace and self.running:
-                        await asyncio.sleep(0.5)
+                        # Periodically re-send the ZFIN frame
+                        if zfin_resends < 3:
+                            chunks = self._build_chunks(zfin_pkt)
+                            await self._send_chunks(tid, dest, chunks)
+                            zfin_resends += 1
+                        await asyncio.sleep(retry_timeout_s / 2)
                         if not await asyncio.to_thread(sender.is_finished):
                             logging.info(f"[Tx-{tid}] RESUME received, re-entering send loop.")
                             break

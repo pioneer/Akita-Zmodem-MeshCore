@@ -160,6 +160,10 @@ class Sender:
             # other control frames ignored
         return out
 
+    def get_zfin_packet(self):
+        """Return the ZFIN (END) frame for retransmission."""
+        return _frame(_END)
+
     def stall_rewind(self):
         """Rewind send position to last acked offset (for stall recovery)."""
         self.offset = self.acked_offset
@@ -304,6 +308,18 @@ class Receiver:
                     resp = _ACK + struct.pack("!Q", self.offset)
                     self._chunks_since_ack = 0
                     out += _frame(resp)
+                # Auto-complete when all expected data received
+                # (handles lost ZFIN on half-duplex mesh radio)
+                if self.expected_size and self.offset >= self.expected_size \
+                   and self.state == 'receiving':
+                    self.state = 'done'
+                    self._pending_chunks.clear()
+                    try:
+                        if self.fobj:
+                            self.fobj.close()
+                    except Exception:
+                        pass
+                    out += _frame(_END)
             elif tp == _END and self.state == 'receiving':
                 self.state = 'done'
                 self._pending_chunks.clear()
