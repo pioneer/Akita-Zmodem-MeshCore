@@ -74,3 +74,9 @@ secrets.py
 
 akita_zmodem_meshcore_config.json
 
+# Local convenience scripts
+*.bat
+
+# Test output dumps
+test_*.txt
+
