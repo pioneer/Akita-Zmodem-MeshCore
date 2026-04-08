@@ -141,8 +141,11 @@ class Sender:
                     off = 0
                 if off > self.filesize:
                     off = self.filesize
-                # RESUME rewinds both offsets — receiver needs data
-                # from this position
+                # Ignore stale RESUME (receiver already moved past this)
+                if off < self.acked_offset:
+                    continue
+                # RESUME rewinds send position; advance acked_offset
+                # only if it's ahead of what we already confirmed.
                 self.offset = off
                 self.acked_offset = off
                 try:
@@ -198,6 +201,7 @@ class Receiver:
         self.ack_interval = max(1, ack_interval)
         self._chunks_since_ack = 0
         self._pending_chunks = {}  # buffer for out-of-order DATA: {offset: data}
+        self._gap_resume_sent = False  # True once RESUME sent for current gap
 
     def is_finished(self):
         return self.state == 'done'
@@ -245,6 +249,7 @@ class Receiver:
                         existing = 0
 
                 self._pending_chunks.clear()
+                self._gap_resume_sent = False
                 if existing and existing < size:
                     # resume: open for append
                     self.offset = existing
@@ -281,9 +286,15 @@ class Receiver:
                         out += _frame(resp)
                         continue
                     self._flush_pending()
+                    self._gap_resume_sent = False  # gap resolved
                 elif off > self.offset:
                     # Out-of-order (ahead): buffer for later
                     self._pending_chunks[off] = chunk
+                    # Request the missing chunk once per gap
+                    if not self._gap_resume_sent:
+                        resp = _RESUME + struct.pack("!Q", self.offset)
+                        self._gap_resume_sent = True
+                        out += _frame(resp)
                 # else: duplicate/stale chunk, discard silently
                 self._chunks_since_ack += 1
                 # Delayed ACK: send ACK every ack_interval chunks,

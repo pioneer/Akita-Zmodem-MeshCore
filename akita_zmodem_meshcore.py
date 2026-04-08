@@ -95,10 +95,28 @@ APP_PORT_HEADER_SIZE = struct.calcsize(APP_PORT_HEADER_FORMAT)
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
+
+class _TqdmLoggingHandler(logging.StreamHandler):
+    """StreamHandler that uses tqdm.write() so log lines don't clash with
+    active progress bars.  Falls back to normal write when tqdm is absent."""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            if TQDM_AVAILABLE:
+                tqdm.write(msg, file=self.stream)
+            else:
+                self.stream.write(msg + self.terminator)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+_console_handler = _TqdmLoggingHandler(sys.stderr)
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
+    handlers=[_console_handler]
 )
 
 # -----------------------------------------------------------------------------
@@ -583,11 +601,9 @@ class AkitaZmodemMeshCore:
 
         MAX_RETRIES = 3
         retry_timeout_s = 15.0   # updated from meshcore suggested_timeout
-        # Stall timeout must cover: time to fill the window (window_size
-        # sends, each paced ~retry_timeout/5) plus a full round-trip for
-        # the ACK.  Scale with window_size so larger windows don't trigger
-        # false stalls.
-        stall_timeout_s = retry_timeout_s * (self.window_size + 1)
+        # Stall timeout: safety net for when RESUME-on-gap doesn't fire.
+        # Two round-trips should be plenty for an ACK to arrive.
+        stall_timeout_s = retry_timeout_s * 2
         retry_count = 0
         last_chunks = []          # b64 chunks of last packet, for retry
         last_send_time = None
@@ -654,7 +670,7 @@ class AkitaZmodemMeshCore:
                         logging.error(f"[Tx-{tid}] Failed to send packet (radio queue full), aborting")
                         break
                     # Update stall timeout when radio reports a new suggested_timeout
-                    stall_timeout_s = retry_timeout_s * (self.window_size + 1)
+                    stall_timeout_s = retry_timeout_s * 2
                     last_chunks = chunks
                     last_send_time = time.time()
                     retry_count = 0
@@ -1140,17 +1156,13 @@ async def main():
     args = parser.parse_args()
 
     if args.log_file:
-        # Debug to file, console stays at INFO
+        # Debug to file, console stays at INFO (tqdm-safe via _TqdmLoggingHandler)
         fh = logging.FileHandler(args.log_file, encoding='utf-8')
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger().addHandler(fh)
         logging.getLogger('meshcore').setLevel(logging.DEBUG)
-        # Keep the existing console handler at INFO
-        for h in logging.getLogger().handlers:
-            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
-                h.setLevel(logging.INFO)
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger('meshcore').setLevel(logging.DEBUG)
