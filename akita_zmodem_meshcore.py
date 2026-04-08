@@ -85,8 +85,8 @@ DEFAULT_CONFIG = {
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
     "tx_delay_ms": 150,            # Throttle to prevent radio buffer saturation
-    "window_size": 4,              # Sliding window: chunks sender can have in-flight
-    "ack_interval": 2              # Receiver ACKs every N chunks (reduces return traffic)
+    "window_size": 2,              # Sliding window: chunks sender can have in-flight
+    "ack_interval": 1              # Receiver ACKs every N chunks (reduces return traffic)
 }
 
 APP_PORT_HEADER_FORMAT = "!H" 
@@ -656,9 +656,10 @@ class AkitaZmodemMeshCore:
         last_acked = 0            # track ACK progress for window stall detection
         last_ack_progress_time = time.time()
 
-        # Dynamic timeout: at ~68 B/s (typical mesh radio) an 82 KB file
-        # takes ~20 min.  Auto-extend so the configured value is a floor.
-        effective_timeout = max(self.timeout, t["total"] / 30 + 120)
+        # Dynamic timeout: real-world throughput is ~15 B/s for direct
+        # and lower for multi-hop.  Use 8 B/s as a conservative floor
+        # to avoid premature timeout on larger files.
+        effective_timeout = max(self.timeout, t["total"] / 8 + 120)
         logging.info(f"[Tx-{tid}] Effective timeout: {effective_timeout:.0f}s (~{effective_timeout/60:.0f} min)")
 
         # Progress Bar
