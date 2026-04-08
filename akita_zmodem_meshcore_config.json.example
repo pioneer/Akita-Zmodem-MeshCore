@@ -8,5 +8,6 @@
     "mesh_serial_baud": 115200,
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
-    "tx_delay_ms": 150
+    "tx_delay_ms": 150,
+    "transfer_mode": "classic"
 }

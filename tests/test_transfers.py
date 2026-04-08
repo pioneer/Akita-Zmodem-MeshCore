@@ -48,6 +48,13 @@ def setup_env(tmp_path, monkeypatch):
 
     mock_zmod = types.SimpleNamespace(Sender=mock_sender_factory, Receiver=mock_receiver_factory)
     monkeypatch.setitem(sys.modules, 'zmodem', mock_zmod)
+    monkeypatch.setitem(sys.modules, 'zmodem_classic', mock_zmod)
+
+    # Also patch the module-level references in akita_zmodem_meshcore in case
+    # the module was already imported (e.g. by test_edgecases.py running first).
+    import akita_zmodem_meshcore as _azm
+    monkeypatch.setattr(_azm, 'zmodem', mock_zmod)
+    monkeypatch.setattr(_azm, 'zmodem_classic', mock_zmod)
 
     yield
 
@@ -113,13 +120,9 @@ async def test_send_file_succeeds(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_receive_file_writes_and_cleans(monkeypatch, tmp_path):
     from akita_zmodem_meshcore import AkitaZmodemMeshCore, APP_PORT_HEADER_FORMAT
-    import zmodem as zmodem_mod
 
     app = AkitaZmodemMeshCore()
     app.mesh = MockMesh()
-
-    # Use MockReceiver so the test doesn't need valid zmodem framing
-    monkeypatch.setattr(zmodem_mod, "Receiver", MockReceiver)
 
     dest = tmp_path / "incoming.bin"
     cli_event = asyncio.Event()
@@ -276,7 +279,7 @@ async def test_end_to_end_app_transfer(tmp_path):
         async def close(self):
             return True
 
-    # make sure the application imports the real zmodem implementation
+    # make sure the application imports the real zmodem implementations
     import importlib, sys, os
     if 'zmodem' in sys.modules:
         del sys.modules['zmodem']
@@ -284,7 +287,13 @@ async def test_end_to_end_app_transfer(tmp_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     sys.modules['zmodem'] = module
-    # force reload of application module so it picks up the real zmodem
+    if 'zmodem_classic' in sys.modules:
+        del sys.modules['zmodem_classic']
+    spec_c = importlib.util.spec_from_file_location('zmodem_classic', os.path.join(os.getcwd(), 'zmodem_classic.py'))
+    module_c = importlib.util.module_from_spec(spec_c)
+    spec_c.loader.exec_module(module_c)
+    sys.modules['zmodem_classic'] = module_c
+    # force reload of application module so it picks up the real modules
     import akita_zmodem_meshcore
     importlib.reload(akita_zmodem_meshcore)
 

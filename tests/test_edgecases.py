@@ -49,7 +49,7 @@ async def test_handle_zmodem_data_open_failure(tmp_path, monkeypatch):
         def __init__(self, f): pass
         def receive(self, data): return b''
         def is_finished(self): return False
-    monkeypatch.setattr('zmodem.Receiver', DummyRecv)
+    monkeypatch.setattr(app, '_zmodem', type('M', (), {'Receiver': DummyRecv, 'Sender': None}))
     # run handler with dummy data
     await app._handle_zmodem_data('peer', b'hello')
     # transfer should have been cancelled

@@ -36,6 +36,7 @@ except Exception:
 
 import base64
 import zmodem
+import zmodem_classic
 import atexit
 import tempfile
 
@@ -85,8 +86,9 @@ DEFAULT_CONFIG = {
     "mesh_tcp_host": "127.0.0.1",
     "mesh_tcp_port": 4403,
     "tx_delay_ms": 150,            # Throttle to prevent radio buffer saturation
-    "window_size": 1,              # Stop-and-wait: best for half-duplex mesh radio
-    "ack_interval": 1              # Receiver ACKs every N chunks (reduces return traffic)
+    "transfer_mode": "classic",     # "classic" (stop-and-wait) or "window" (sliding window)
+    "window_size": 1,              # Sliding window size (only used in "window" mode)
+    "ack_interval": 1              # Receiver ACKs every N chunks (only used in "window" mode)
 }
 
 APP_PORT_HEADER_FORMAT = "!H" 
@@ -281,7 +283,13 @@ class AkitaZmodemMeshCore:
         logging.debug(f"Derived zmodem_chunk_size={self.zmodem_chunk_size} from "
                       f"mesh_packet_chunk_size={self.mesh_packet_chunk_size}")
 
-        # Sliding window parameters
+        # Transfer mode: "classic" (stop-and-wait) or "window" (sliding window)
+        self.transfer_mode = self.app_config.get("transfer_mode", DEFAULT_CONFIG["transfer_mode"])
+        if self.transfer_mode == "classic":
+            self._zmodem = zmodem_classic
+        else:
+            self._zmodem = zmodem
+        # Sliding window parameters (only meaningful in "window" mode)
         self.window_size = int(self.app_config.get("window_size", DEFAULT_CONFIG["window_size"]))
         self.ack_interval = int(self.app_config.get("ack_interval", DEFAULT_CONFIG["ack_interval"]))
 
@@ -314,6 +322,9 @@ class AkitaZmodemMeshCore:
             if key in ("mesh_packet_chunk_size", "timeout") and val is not None:
                 if val <= 0:
                     raise ValueError(f"{key} must be positive")
+        mode = self.app_config.get("transfer_mode")
+        if mode is not None and mode not in ("classic", "window"):
+            raise ValueError(f"transfer_mode must be 'classic' or 'window', got '{mode}'")
 
     @staticmethod
     def _calc_stall_timeout(suggested_timeout_s, path_len):
@@ -543,7 +554,7 @@ class AkitaZmodemMeshCore:
         
         logging.info(f"[Tx-{tid}] File: {os.path.basename(filepath)} | Size: {fsize:,} bytes | MD5: {checksum}")
         logging.info(f"[Tx-{tid}] Zmodem chunk_size={self.zmodem_chunk_size} (1 frame per mesh message)")
-        logging.info(f"[Tx-{tid}] Sliding window: size={self.window_size} ack_interval={self.ack_interval}")
+        logging.info(f"[Tx-{tid}] Transfer mode: {self.transfer_mode} | window={self.window_size} ack_interval={self.ack_interval}")
         route_desc = await self._describe_route(dest_node)
         if route_desc:
             logging.info(f"[Tx-{tid}] {route_desc}")
@@ -553,7 +564,7 @@ class AkitaZmodemMeshCore:
             sync_f = await asyncio.to_thread(open, filepath, "rb")
             # let the sender use the auto-computed chunk_size that
             # guarantees every frame fits in one mesh message.
-            sender = await asyncio.to_thread(zmodem.Sender, sync_f, self.zmodem_chunk_size, self.window_size)
+            sender = await asyncio.to_thread(self._zmodem.Sender, sync_f, self.zmodem_chunk_size, self.window_size)
         except Exception as e:
             logging.error(f"Zmodem Init Error: {e}")
             if 'sync_f' in locals() and sync_f: sync_f.close()
@@ -857,7 +868,7 @@ class AkitaZmodemMeshCore:
                 t["state"] = "receiving"
                 t["sync_f"] = None
                 try:
-                    t["receiver"] = await asyncio.to_thread(zmodem.Receiver, t["file"], self.ack_interval)
+                    t["receiver"] = await asyncio.to_thread(self._zmodem.Receiver, t["file"], self.ack_interval)
                 except Exception as e:
                     logging.error(f"[Rx-{tid}] Cannot init receiver for '{t['file']}': {e}")
                     self.cancel_transfer(tid)
@@ -1185,6 +1196,8 @@ async def main():
                         help="Enable debug logging")
     parser.add_argument("--log-file", dest="log_file", metavar="FILE",
                         help="Write debug-level log to FILE (console stays normal)")
+    parser.add_argument("--mode", choices=["classic", "window"],
+                        help="Transfer mode: 'classic' (stop-and-wait) or 'window' (sliding window)")
     
     sub = parser.add_subparsers(dest="command")
     
@@ -1238,6 +1251,8 @@ async def main():
         logging.getLogger('meshcore').setLevel(logging.DEBUG)
 
     overrides = {}
+    if args.mode:
+        overrides["transfer_mode"] = args.mode
     if args.mesh_type:
         overrides["mesh_connection_type"] = args.mesh_type
     if args.serial_port:
