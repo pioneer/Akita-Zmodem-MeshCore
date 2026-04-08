@@ -119,6 +119,18 @@ logging.basicConfig(
     handlers=[_console_handler]
 )
 
+def _sanitize_root_handlers():
+    """Remove any StreamHandlers from root logger that aren't ours.
+
+    Called after library init (e.g. meshcore) which may silently add
+    default StreamHandlers that bypass our tqdm-safe handler and level
+    filtering.
+    """
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) and h is not _console_handler:
+            root.removeHandler(h)
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -371,6 +383,9 @@ class AkitaZmodemMeshCore:
             
             if self.mesh:
                 logging.info("Connected to MeshCore Network.")
+                # meshcore may add its own StreamHandlers to root logger;
+                # strip any that aren't ours so DEBUG doesn't leak to console.
+                _sanitize_root_handlers()
                 self.mesh.subscribe(EventType.CONTACT_MSG_RECV, self._on_mesh_message)
                 self.mesh.subscribe(EventType.ERROR, self._on_mesh_error)
                 # Meshcore doesn't deliver messages automatically — we must
@@ -1160,8 +1175,11 @@ async def main():
         fh = logging.FileHandler(args.log_file, encoding='utf-8')
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger().addHandler(fh)
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        root.addHandler(fh)
+        _sanitize_root_handlers()
+        _console_handler.setLevel(logging.INFO)
         logging.getLogger('meshcore').setLevel(logging.DEBUG)
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
